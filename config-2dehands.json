@@ -1,0 +1,9 @@
+{
+  "url": "https://www.2dehands.be/l/fietsen-en-brommers/fietsen-racefietsen/f/carbon/3584/#Language:all-languages|sortBy:SORT_INDEX|sortOrder:DECREASING",
+  "check_interval": 300,
+  "max_bikes": 450,
+  "initial_pages": 15,
+  "ongoing_pages": 5,
+  "backup_file": "backups/2dehands_backup.json",
+  "log_file": "2dehands.log"
+}
