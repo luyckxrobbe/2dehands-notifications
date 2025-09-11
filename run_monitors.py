@@ -293,9 +293,16 @@ def run_init_buffer(config_file: str) -> Tuple[str, bool]:
     logger.info(f"🔄 Initializing buffer for: {config_file}")
     
     try:
+        # Use the virtual environment Python if available
+        venv_python = Path(".venv/bin/python")
+        if venv_python.exists():
+            python_executable = str(venv_python)
+        else:
+            python_executable = sys.executable
+        
         # Run init_buffer.py with the config file
         result = subprocess.run(
-            [sys.executable, "init_buffer.py", config_file],
+            [python_executable, "init_buffer.py", config_file],
             capture_output=True,
             text=True,
             timeout=300  # 5 minute timeout
@@ -400,7 +407,14 @@ def run_monitor(config_file: str, process_id: int) -> Tuple[subprocess.Popen, th
     config = load_config(config_file)
     skip_initial = config.get('initial_check', True) == False  # Default to True (don't skip) if not specified
     
-    cmd = [sys.executable, "bike_monitor.py", config_file]
+    # Use the virtual environment Python if available
+    venv_python = Path(".venv/bin/python")
+    if venv_python.exists():
+        python_executable = str(venv_python)
+    else:
+        python_executable = sys.executable
+    
+    cmd = [python_executable, "bike_monitor.py", config_file]
     if skip_initial:
         cmd.append("--skip-initial")
     
