@@ -358,6 +358,27 @@ class CurrentListings:
         
         return CurrentListings(filtered_bikes)
     
+    def filter_by_scraped_date(self, target_date: Optional[datetime.date] = None) -> 'CurrentListings':
+        """
+        Filter bikes by scraped date.
+        
+        Args:
+            target_date: Date to filter by (defaults to today)
+            
+        Returns:
+            New CurrentListings instance with filtered bikes
+        """
+        if target_date is None:
+            from datetime import datetime
+            target_date = datetime.now().date()
+        
+        filtered_bikes = []
+        for bike in self.bikes:
+            if bike._scraped_at.date() == target_date:
+                filtered_bikes.append(bike)
+        
+        return CurrentListings(filtered_bikes)
+    
     def sort_by_price(self, ascending: bool = True) -> 'CurrentListings':
         """
         Sort bikes by price.

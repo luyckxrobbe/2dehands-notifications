@@ -342,64 +342,60 @@ class BikeMonitor:
                     else:
                         logger.debug(f"No date_posted found for {bike.title}. Detailed info keys: {list(detailed_info.keys()) if detailed_info else 'None'}")
                     
-                    if detailed_info and detailed_info.get('date_posted'):
-                        scraper = ListingScraper(
-                            headless=True,
-                            proxies=self.proxies if self.proxies else None,
-                            request_delay=self.request_delay
-                        )
-                        is_today = scraper.is_today(detailed_info['date_posted'])
+                    # Use scraped_at timestamp instead of unreliable website date
+                    # Check if bike was scraped today (more reliable than website date)
+                    is_today = bike.is_scraped_today()
+                    
+                    if is_today:
+                        # Check if seller is a business seller
+                        seller_type = None
+                        if detailed_info and detailed_info.get('seller'):
+                            seller_type = detailed_info['seller'].get('type', '').strip()
                         
-                        if is_today:
-                            # Check if seller is a business seller
-                            seller_type = None
-                            if detailed_info and detailed_info.get('seller'):
-                                seller_type = detailed_info['seller'].get('type', '').strip()
+                        if seller_type and seller_type.lower() == "zakelijke verkoper":
+                            logger.info(f"Bike is from business seller - skipping notification: {bike.title}")
+                            return False
+                        
+                        # Check if it's actually a race bike using GPT (only for sportfietsen configs)
+                        if self.race_bike_classifier:
+                            is_race_bike = self.race_bike_classifier.classify_bike({
+                                'title': bike.title,
+                                'description': detailed_info.get('description', '')
+                            })
                             
-                            if seller_type and seller_type.lower() == "zakelijke verkoper":
-                                logger.info(f"Bike is from business seller - skipping notification: {bike.title}")
+                            if not is_race_bike:
+                                logger.info(f"Bike is not a race bike according to GPT - skipping notification: {bike.title}")
                                 return False
-                            
-                            # Check if it's actually a race bike using GPT (only for sportfietsen configs)
-                            if self.race_bike_classifier:
-                                is_race_bike = self.race_bike_classifier.classify_bike({
-                                    'title': bike.title,
-                                    'description': detailed_info.get('description', '')
-                                })
-                                
-                                if not is_race_bike:
-                                    logger.info(f"Bike is not a race bike according to GPT - skipping notification: {bike.title}")
-                                    return False
-                            
-                            logger.info(f"Bike is from today and is a race bike - sending notification: {bike.title}")
-                            
-                            # Format message with detailed info
-                            message = self.format_bike_message(bike, detailed_info)
-                            
-                            # Send message with HTML parsing
-                            success = await self.telegram_bot.send_message(
-                                chat_id=self.chat_id,
-                                message=message,
-                                parse_mode='HTML'
-                            )
-                            
-                            if success:
-                                logger.info(f"Notification sent for today's bike: {bike.title}")
-                            else:
-                                logger.error(f"Failed to send notification for bike: {bike.title}")
-                            
-                            return success
+                        
+                        logger.info(f"Bike is from today and is a race bike - sending notification: {bike.title}")
+                        
+                        # Format message with detailed info
+                        message = self.format_bike_message(bike, detailed_info)
+                        
+                        # Send message with HTML parsing
+                        success = await self.telegram_bot.send_message(
+                            chat_id=self.chat_id,
+                            message=message,
+                            parse_mode='HTML'
+                        )
+                        
+                        if success:
+                            logger.info(f"Notification sent for today's bike: {bike.title}")
                         else:
-                            logger.info(f"Bike is not from today - skipping notification: {bike.title}")
-                            return False
+                            logger.error(f"Failed to send notification for bike: {bike.title}")
+                        
+                        return success
                     else:
-                        if attempt < max_retries - 1:
-                            logger.warning(f"Could not determine date for bike: {bike.title} - retrying in 2 seconds...")
-                            await asyncio.sleep(2)  # Wait 2 seconds before retry
-                            continue
-                        else:
-                            logger.warning(f"Could not determine date for bike after {max_retries} attempts: {bike.title}")
-                            return False
+                        logger.info(f"Bike is not from today - skipping notification: {bike.title}")
+                        return False
+                else:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Could not determine date for bike: {bike.title} - retrying in 2 seconds...")
+                        await asyncio.sleep(2)  # Wait 2 seconds before retry
+                        continue
+                    else:
+                        logger.warning(f"Could not determine date for bike after {max_retries} attempts: {bike.title}")
+                        return False
                     
                 except Exception as e:
                     if attempt < max_retries - 1:

@@ -52,7 +52,7 @@ class Bike:
         Returns:
             Bike instance
         """
-        return cls(
+        bike = cls(
             title=data.get('title', ''),
             price=data.get('price', ''),
             href=data.get('href', ''),
@@ -63,6 +63,16 @@ class Bike:
             description=data.get('description', ''),
             image=data.get('image', '')
         )
+        
+        # Restore the scraped_at timestamp if it exists in the data
+        if 'scraped_at' in data:
+            try:
+                bike._scraped_at = datetime.fromisoformat(data['scraped_at'])
+            except (ValueError, TypeError):
+                # If parsing fails, keep the current timestamp (datetime.now())
+                pass
+        
+        return bike
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -215,6 +225,17 @@ class Bike:
                 return brand.title()
         
         return None
+    
+    def is_scraped_today(self) -> bool:
+        """
+        Check if this bike was scraped today.
+        
+        Returns:
+            True if the bike was scraped today, False otherwise
+        """
+        from datetime import datetime
+        today = datetime.now().date()
+        return self._scraped_at.date() == today
     
     def is_new_listing(self, other_bikes: List['Bike']) -> bool:
         """
