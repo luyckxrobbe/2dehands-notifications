@@ -154,9 +154,8 @@ class CurrentListings:
             logger = logging.getLogger(__name__)
             logger.info(f"Duplicate detection: Found {duplicates_found} duplicates out of {len(bikes_not_in_window)} new bikes")
         
-        # Update our collection with only the truly new bikes (not all scraped bikes)
-        # This prevents duplicates from being added to the rolling window
-        self.add_bikes(truly_new_bikes)
+        # Don't add bikes to cache yet - let the caller decide when to add them
+        # This prevents bikes from being added to cache before notifications are sent
         
         return truly_new_bikes
     

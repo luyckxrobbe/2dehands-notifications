@@ -12,7 +12,7 @@ import os
 import signal
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, time
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
@@ -52,6 +52,7 @@ class BikeMonitor:
         """
         self.url = config['url']
         self.check_interval = config['check_interval']
+        self.time_based_intervals = config.get('time_based_intervals', {})
         self.max_bikes = config['max_bikes']
         self.initial_pages = config['initial_pages']
         self.ongoing_pages = config['ongoing_pages']
@@ -74,12 +75,31 @@ class BikeMonitor:
         # Try to load existing buffer from backup file
         if self.backup_file and self.backup_file.exists():
             try:
+                logger.info(f"🔄 Loading existing buffer from {self.backup_file}...")
                 self.previous_listings = CurrentListings.from_json_file(self.backup_file, max_bikes=self.max_bikes)
-                logger.info(f"Loaded existing buffer with {len(self.previous_listings)} bikes from {self.backup_file}")
+                logger.info(f"✅ Successfully loaded buffer with {len(self.previous_listings)} bikes from backup")
+                
+                # Show some buffer statistics
+                if len(self.previous_listings) > 0:
+                    # Get a sample of recent bikes
+                    recent_bikes = sorted(self.previous_listings.bikes, key=lambda b: b._scraped_at, reverse=True)[:3]
+                    logger.info(f"📊 Buffer contains bikes from {recent_bikes[-1]._scraped_at.strftime('%Y-%m-%d %H:%M')} to {recent_bikes[0]._scraped_at.strftime('%Y-%m-%d %H:%M')}")
+                    logger.info(f"🔗 Sample recent bikes:")
+                    for i, bike in enumerate(recent_bikes, 1):
+                        logger.info(f"   {i}. {bike.title[:60]}... (€{bike.price})")
+                else:
+                    logger.warning("⚠️  Loaded buffer is empty")
+                    
             except Exception as e:
-                logger.warning(f"Could not load existing buffer: {e}")
+                logger.error(f"❌ Could not load existing buffer from {self.backup_file}: {e}")
+                logger.info("🆕 Starting with empty buffer")
                 self.previous_listings = CurrentListings(max_bikes=self.max_bikes)
         else:
+            if self.backup_file:
+                logger.info(f"📁 Backup file {self.backup_file} does not exist")
+            else:
+                logger.info("📁 No backup file configured")
+            logger.info("🆕 Starting with empty buffer")
             self.previous_listings = CurrentListings(max_bikes=self.max_bikes)  # Rolling window of bikes
         
         # Initialize Telegram bot
@@ -97,24 +117,69 @@ class BikeMonitor:
         self.listing_scraper = None
         self.is_initial_run = not skip_initial  # Track if this is the first run
         
-        logger.info(f"BikeMonitor initialized for URL: {self.url}")
-        logger.info(f"Check interval: {self.check_interval} seconds")
-        logger.info(f"Rolling window: {self.max_bikes} bikes")
-        logger.info(f"Initial pages: {self.initial_pages} (for buffer filling)")
-        logger.info(f"Ongoing pages: {self.ongoing_pages} (for monitoring)")
-        if self.backup_file:
-            logger.info(f"Backup file: {self.backup_file}")
+        logger.info(f"🚴‍♂️ BikeMonitor initialized for URL: {self.url}")
+        
+        if self.time_based_intervals:
+            logger.info(f"⏰ Time-based intervals configured:")
+            for time_range, interval in self.time_based_intervals.items():
+                logger.info(f"   • {time_range}: {interval/60:.0f} minutes ({interval} seconds)")
+            logger.info(f"⏰ Default interval: {self.check_interval} seconds")
         else:
-            logger.info("Backup file: disabled")
-        logger.info(f"Log file: {self.log_file}")
-        logger.info(f"Telegram chat ID: {self.chat_id}")
+            logger.info(f"⏰ Check interval: {self.check_interval} seconds")
+        
+        logger.info(f"🪟 Rolling window: {self.max_bikes} bikes")
+        logger.info(f"📄 Initial pages: {self.initial_pages} (for buffer filling)")
+        logger.info(f"📄 Ongoing pages: {self.ongoing_pages} (for monitoring)")
+        if self.backup_file:
+            logger.info(f"💾 Backup file: {self.backup_file}")
+        else:
+            logger.info("💾 Backup file: disabled")
+        logger.info(f"📝 Log file: {self.log_file}")
+        logger.info(f"📱 Telegram chat ID: {self.chat_id}")
+        
+        # Show buffer status
+        if len(self.previous_listings) > 0:
+            logger.info(f"🧠 Buffer status: {len(self.previous_listings)} bikes loaded and ready")
+        else:
+            logger.info("🧠 Buffer status: Empty - will build buffer on first run")
+            
         if skip_initial:
             if self.backup_file and self.backup_file.exists():
-                logger.info("Initial buffer building: SKIPPED (using existing buffer)")
+                logger.info("🏗️  Initial buffer building: SKIPPED (using existing buffer)")
             else:
-                logger.warning("Initial buffer building: SKIPPED but no backup file found - will start with empty buffer")
+                logger.warning("🏗️  Initial buffer building: SKIPPED but no backup file found - will start with empty buffer")
         else:
-            logger.info("Initial buffer building: ENABLED")
+            logger.info("🏗️  Initial buffer building: ENABLED")
+    
+    def get_current_interval(self) -> int:
+        """
+        Get the current check interval based on the time of day.
+        
+        Returns:
+            Interval in seconds
+        """
+        if not self.time_based_intervals:
+            return self.check_interval
+        
+        current_time = datetime.now().time()
+        
+        for time_range, interval in self.time_based_intervals.items():
+            start_str, end_str = time_range.split('-')
+            start_time = time.fromisoformat(start_str)
+            end_time = time.fromisoformat(end_str)
+            
+            # Handle the case where the range crosses midnight (e.g., 16:00-00:00)
+            if start_time <= end_time:
+                # Normal range (e.g., 07:00-16:00)
+                if start_time <= current_time <= end_time:
+                    return interval
+            else:
+                # Range crosses midnight (e.g., 16:00-00:00)
+                if current_time >= start_time or current_time <= end_time:
+                    return interval
+        
+        # Fallback to default interval if no time range matches
+        return self.check_interval
     
     def format_bike_message(self, bike: Bike, detailed_info: Optional[Dict[str, Any]] = None) -> str:
         """
@@ -218,6 +283,11 @@ class BikeMonitor:
         Returns:
             True if notification sent successfully, False if not from today or error
         """
+        # Safety check: don't process bikes that are already in our cache
+        if bike in self.previous_listings.bikes:
+            logger.warning(f"Bike {bike.title} is already in cache - skipping notification check")
+            return False
+        
         max_retries = 2  # Try up to 2 times (initial attempt + 1 retry)
         
         for attempt in range(max_retries):
@@ -251,6 +321,15 @@ class BikeMonitor:
                         is_today = scraper.is_today(detailed_info['date_posted'])
                         
                         if is_today:
+                            # Check if seller is a business seller
+                            seller_type = None
+                            if detailed_info and detailed_info.get('seller'):
+                                seller_type = detailed_info['seller'].get('type', '').strip()
+                            
+                            if seller_type and seller_type.lower() == "zakelijke verkoper":
+                                logger.info(f"Bike is from business seller - skipping notification: {bike.title}")
+                                return False
+                            
                             logger.info(f"Bike is from today - sending notification: {bike.title}")
                             
                             # Format message with detailed info
@@ -327,16 +406,26 @@ class BikeMonitor:
                 logger.info(f"Found {initial_new_count} listings not in rolling window")
                 logger.info(f"After duplicate detection: {len(truly_new_bikes)} truly new listings")
                 
-                # Check each new bike and only send notifications for today's listings
+                # Process truly new bikes and add them to cache after processing
                 notifications_sent = 0
+                processed_bikes = []
+                
                 for bike in truly_new_bikes:
                     # This method will check if it's from today and only send if it is
                     success = await self.check_and_send_bike_notification(bike)
                     if success:
                         notifications_sent += 1
                     
+                    # Add bike to processed list regardless of notification success
+                    # This ensures we don't re-process the same bike
+                    processed_bikes.append(bike)
+                    
                     # Small delay between checks to avoid rate limiting
                     await asyncio.sleep(2)
+                
+                # Add all processed bikes to cache to prevent re-processing
+                self.previous_listings.add_bikes(processed_bikes)
+                logger.info(f"Added {len(processed_bikes)} processed bikes to cache")
                 
                 if notifications_sent > 0:
                     logger.info(f"Sent {notifications_sent} notifications for today's listings")
@@ -355,10 +444,11 @@ class BikeMonitor:
                 self.is_initial_run = False
                 logger.info("Initial buffer building complete - switching to ongoing monitoring mode")
             
-            # Optional: backup to file for debugging
+            # Save backup to file (essential for preventing duplicates on restart)
             if self.backup_file:
                 self.previous_listings.to_json_file(self.backup_file)
-                logger.debug(f"Backed up {len(self.previous_listings)} listings to {self.backup_file}")
+                logger.info(f"💾 Backed up {len(self.previous_listings)} listings to {self.backup_file}")
+                logger.debug(f"📁 Backup file size: {self.backup_file.stat().st_size / 1024 / 1024:.2f} MB")
             
             logger.info(f"Rolling window now contains {len(self.previous_listings)} bikes")
             logger.info("Bike listing check completed successfully")
@@ -376,7 +466,15 @@ class BikeMonitor:
         # Send startup notification
         startup_message = f"🚴‍♂️ <b>Enhanced Bike Monitor Started</b>\n\n"
         startup_message += f"Monitoring: {self.url}\n"
-        startup_message += f"Check interval: {self.check_interval} seconds\n"
+        
+        if self.time_based_intervals:
+            startup_message += f"Time-based intervals:\n"
+            for time_range, interval in self.time_based_intervals.items():
+                startup_message += f"• {time_range}: {interval/60:.0f} minutes\n"
+            startup_message += f"Default interval: {self.check_interval} seconds\n"
+        else:
+            startup_message += f"Check interval: {self.check_interval} seconds\n"
+        
         startup_message += f"Buffer size: {self.max_bikes} bikes\n"
         if self.is_initial_run:
             startup_message += f"Initial scan: {self.initial_pages} pages\n"
@@ -399,7 +497,18 @@ class BikeMonitor:
         # Main monitoring loop
         while self.running:
             try:
-                await asyncio.sleep(self.check_interval)
+                # Get current interval based on time of day
+                current_interval = self.get_current_interval()
+                
+                # Log interval change if it's different from the last one
+                if hasattr(self, '_last_interval') and self._last_interval != current_interval:
+                    logger.info(f"⏰ Interval changed to {current_interval} seconds ({current_interval/60:.1f} minutes)")
+                elif not hasattr(self, '_last_interval'):
+                    logger.info(f"⏰ Using interval: {current_interval} seconds ({current_interval/60:.1f} minutes)")
+                
+                self._last_interval = current_interval
+                
+                await asyncio.sleep(current_interval)
                 if self.running:  # Check again in case we were stopped during sleep
                     await self.check_for_new_listings()
             except asyncio.CancelledError:
