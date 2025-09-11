@@ -12,5 +12,6 @@
   "ongoing_pages": 5,
   "backup_file": "backups/marktplaats_backup.json",
   "log_file": "marktplaats.log",
-  "init_buffer": false
+  "init_buffer": false,
+  "initial_check": false
 }

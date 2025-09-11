@@ -10,6 +10,7 @@ import json
 import time
 import glob
 import concurrent.futures
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
@@ -69,18 +70,70 @@ def run_init_buffer(config_file: str) -> Tuple[str, bool]:
         return (config_file, False)
 
 
-def run_monitor(config_file: str) -> subprocess.Popen:
+def stream_output(process: subprocess.Popen, prefix: str, config_file: str):
     """
-    Start a monitor process for the given config file.
+    Stream output from a subprocess with a prefix.
+    
+    Args:
+        process: The subprocess to stream output from
+        prefix: Prefix to add to each line (e.g., "[1]")
+        config_file: Config file name for identification
+    """
+    def read_stdout():
+        try:
+            for line in iter(process.stdout.readline, b''):
+                if line:
+                    print(f"{prefix} {line.decode('utf-8').rstrip()}")
+        except Exception as e:
+            print(f"{prefix} Error reading stdout: {e}")
+    
+    def read_stderr():
+        try:
+            for line in iter(process.stderr.readline, b''):
+                if line:
+                    print(f"{prefix} {line.decode('utf-8').rstrip()}")
+        except Exception as e:
+            print(f"{prefix} Error reading stderr: {e}")
+    
+    # Start threads for stdout and stderr
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    
+    stdout_thread.start()
+    stderr_thread.start()
+    
+    return stdout_thread, stderr_thread
+
+
+def run_monitor(config_file: str, process_id: int) -> Tuple[subprocess.Popen, threading.Thread, threading.Thread]:
+    """
+    Start a monitor process for the given config file with output streaming.
     
     Args:
         config_file: Path to the JSON configuration file
+        process_id: Unique ID for this process (used in prefix)
         
     Returns:
-        Process object
+        Tuple of (process, stdout_thread, stderr_thread)
     """
+    # Load config to check if we should skip initial check
+    config = load_config(config_file)
+    skip_initial = config.get('initial_check', True) == False  # Default to True (don't skip) if not specified
+    
     cmd = [sys.executable, "bike_monitor.py", config_file]
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if skip_initial:
+        cmd.append("--skip-initial")
+    
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1)
+    
+    # Create prefix based on process ID and config file name
+    config_name = Path(config_file).stem
+    prefix = f"[{process_id}] {config_name}"
+    
+    # Start output streaming threads
+    stdout_thread, stderr_thread = stream_output(process, prefix, config_file)
+    
+    return process, stdout_thread, stderr_thread
 
 
 def find_config_files(paths: List[str]) -> List[str]:
@@ -166,6 +219,7 @@ def main():
         print("  - Supports folders (finds all *.json files)")
         print("  - Supports glob patterns")
         print("  - Handles graceful shutdown with Ctrl+C")
+        print("  - Real-time output streaming with process prefixes")
         sys.exit(1)
     
     # Find all config files from the provided paths
@@ -180,6 +234,7 @@ def main():
     print()
     
     processes = []
+    process_counter = 1
     
     print("🚴‍♂️ Starting multiple bike monitors...")
     print()
@@ -223,8 +278,9 @@ def main():
                 time.sleep(delay_minutes * 60)  # Convert minutes to seconds
             
             print(f"   Starting monitor: {config_file}")
-            process = run_monitor(config_file)
-            processes.append((config_file, process))
+            process, stdout_thread, stderr_thread = run_monitor(config_file, process_counter)
+            processes.append((config_file, process, stdout_thread, stderr_thread))
+            process_counter += 1
     
     # Run buffer initialization in parallel for configs that need it
     if configs_needing_init:
@@ -250,8 +306,9 @@ def main():
                         time.sleep(delay_minutes * 60)  # Convert minutes to seconds
                     
                     print(f"🚀 Starting monitor: {config_file}")
-                    process = run_monitor(config_file)
-                    processes.append((config_file, process))
+                    process, stdout_thread, stderr_thread = run_monitor(config_file, process_counter)
+                    processes.append((config_file, process, stdout_thread, stderr_thread))
+                    process_counter += 1
                 else:
                     print(f"❌ Failed to initialize buffer for: {config_file}")
                     print(f"   Skipping monitor startup for: {config_file}")
@@ -262,16 +319,17 @@ def main():
     
     print(f"\n✅ Started {len(processes)} monitors")
     print("Press Ctrl+C to stop all monitors")
+    print("Output format: [ID] config_name message")
     print()
     
     try:
         # Wait for all processes
         while True:
             # Check if any process has died
-            for config_file, process in processes[:]:
+            for config_file, process, stdout_thread, stderr_thread in processes[:]:
                 if process.poll() is not None:
                     print(f"⚠️  Monitor {config_file} stopped unexpectedly")
-                    processes.remove((config_file, process))
+                    processes.remove((config_file, process, stdout_thread, stderr_thread))
             
             if not processes:
                 print("❌ All monitors have stopped")
@@ -284,12 +342,12 @@ def main():
         print("\n🛑 Stopping all monitors...")
         
         # Terminate all processes
-        for config_file, process in processes:
+        for config_file, process, stdout_thread, stderr_thread in processes:
             print(f"Stopping: {config_file}")
             process.terminate()
         
         # Wait for processes to terminate
-        for config_file, process in processes:
+        for config_file, process, stdout_thread, stderr_thread in processes:
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
