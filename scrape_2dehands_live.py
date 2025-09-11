@@ -2,22 +2,32 @@
 import argparse
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from bike import Bike
 from current_listings import CurrentListings
 from web_navigator import WebNavigator
+from centralized_logging import setup_logging, get_logger
+
+# Configure logging
+setup_logging()
+logger = get_logger(__name__)
 
 
 LISTING_SELECTOR = "li.hz-Listing.hz-Listing--list-item"
 
 
 async def extract_listing_from_li(page, li, navigator) -> Dict[str, Any]:
+    import time
+    start_time = time.time()
+    
     # Skip promotional listings with long data-tracking attributes
     a = li.locator("a.hz-Listing-coverLink").first
     data_tracking = await a.get_attribute("data-tracking")
     if data_tracking and len(data_tracking) > 200:  # Promotional listings have very long tracking strings
+        logger.debug(f"Skipped promotional listing (data-tracking length: {len(data_tracking)})")
         return None
 
     title = await li.locator("h3.hz-Listing-title").text_content()
@@ -107,11 +117,15 @@ async def extract_listing_from_li(page, li, navigator) -> Dict[str, Any]:
     if final_href and final_href.startswith("/"):
         # Detect domain from current page URL
         current_url = page.url
-        if "marktplaats.nl" in current_url:
+        if current_url and "marktplaats.nl" in current_url:
             base_url = "https://www.marktplaats.nl"
         else:
             base_url = "https://www.2dehands.be"
         final_href = f"{base_url}{final_href}"
+    
+    total_time = time.time() - start_time
+    logger.debug(f"Listing extraction took {total_time:.3f}s for: {title[:50] if title else 'No title'}...")
+    
     return {
         "title": title,
         "price": price,
@@ -126,30 +140,52 @@ async def extract_listing_from_li(page, li, navigator) -> Dict[str, Any]:
 
 
 async def scrape_page(navigator: WebNavigator, url: str) -> List[Dict[str, Any]]:
+    import time
+    start_time = time.time()
+    logger.debug(f"Starting to scrape page: {url}")
+    
     page = await navigator.new_page()
+    page_start = time.time()
+    logger.debug(f"Created new page in {page_start - start_time:.2f}s")
     
     try:
         # Navigate to the page with faster loading strategy for pagination
         # For pagination pages, use domcontentloaded instead of networkidle for faster loading
         wait_until = "domcontentloaded" if "/p/" in url else "networkidle"
+        nav_start = time.time()
         success = await navigator.navigate_to(page, url, wait_until=wait_until)
+        nav_end = time.time()
+        logger.debug(f"Navigation took {nav_end - nav_start:.2f}s")
+        
         if not success:
+            logger.debug("Navigation failed, returning empty results")
             return []
         
         # Handle consent banner first
+        consent_start = time.time()
         await navigator.handle_2dehands_consent_banner(page)
+        consent_end = time.time()
+        logger.debug(f"Consent banner handling took {consent_end - consent_start:.2f}s")
         
         # Handle cookie banner
+        cookie_start = time.time()
         await navigator.handle_cookie_banner(page)
+        cookie_end = time.time()
+        logger.debug(f"Cookie banner handling took {cookie_end - cookie_start:.2f}s")
         
         # Wait for listings to load
+        selector_start = time.time()
         selector_found = await navigator.wait_for_selector_with_timeout(page, LISTING_SELECTOR, timeout=20000)
         await asyncio.sleep(1)  # Additional wait for dynamic content
+        selector_end = time.time()
+        logger.debug(f"Selector wait took {selector_end - selector_start:.2f}s")
 
         li_nodes = page.locator(LISTING_SELECTOR)
         total = await li_nodes.count()
+        logger.debug(f"Found {total} listing elements on page")
         results: List[Dict[str, Any]] = []
 
+        extraction_start = time.time()
         for i in range(total):
             li = li_nodes.nth(i)
             try:
@@ -160,11 +196,18 @@ async def scrape_page(navigator: WebNavigator, url: str) -> List[Dict[str, Any]]
             except Exception:
                 # Continue with next listing if something goes wrong for this one
                 continue
+        
+        extraction_end = time.time()
+        logger.debug(f"Extracted {len(results)} listings in {extraction_end - extraction_start:.2f}s")
+        
+        total_time = time.time() - start_time
+        logger.debug(f"Total page scrape time: {total_time:.2f}s for {len(results)} listings")
 
         return results
         
     finally:
         await page.close()
+        logger.debug("Page closed")
 
 
 def get_page_url(base_url: str, page_num: int) -> str:
@@ -220,39 +263,61 @@ async def scrape_bikes(
     Returns:
         CurrentListings object with scraped bikes
     """
+    import time
+    total_start = time.time()
+    logger.debug(f"Starting scrape_bikes: {max_pages} pages, headless={headless}")
+    
     all_listings = []
     
     # Create WebNavigator with proxy support
+    navigator_start = time.time()
     navigator = WebNavigator(
         headless=headless,
         proxies=proxies,
         request_delay=request_delay
     )
+    navigator_end = time.time()
+    logger.debug(f"Created WebNavigator in {navigator_end - navigator_start:.2f}s")
     
     async with navigator:
         for page_num in range(1, max_pages + 1):
             try:
+                page_start = time.time()
                 page_url = get_page_url(url, page_num)
+                logger.debug(f"Scraping page {page_num}: {page_url}")
                 
                 listings_data = await scrape_page(navigator, page_url)
                 
                 # If we got no listings and this is not the first page, the page probably doesn't exist
                 if len(listings_data) == 0 and page_num > 1:
+                    logger.debug(f"No listings on page {page_num}, stopping")
                     break
                 
                 all_listings.extend(listings_data)
-                print(f"Found {len(listings_data)} listings on page {page_num}")
+                page_end = time.time()
+                logger.info(f"Found {len(listings_data)} listings on page {page_num} (took {page_end - page_start:.2f}s)")
                 
                 # Delay between pages (handled by WebNavigator)
                 if page_num < max_pages:
+                    delay_start = time.time()
                     await asyncio.sleep(2)  # Additional delay between pages
+                    delay_end = time.time()
+                    logger.debug(f"Page delay took {delay_end - delay_start:.2f}s")
                     
             except Exception as e:
-                print(f"Error scraping page {page_num}: {e}")
+                logger.error(f"Error scraping page {page_num}: {e}")
                 break
 
     # Convert to Bike objects and return CurrentListings
-    return CurrentListings.from_list(all_listings)
+    conversion_start = time.time()
+    result = CurrentListings.from_list(all_listings)
+    conversion_end = time.time()
+    logger.debug(f"Converted to CurrentListings in {conversion_end - conversion_start:.2f}s")
+    
+    total_time = time.time() - total_start
+    logger.debug(f"Total scrape_bikes time: {total_time:.2f}s for {len(all_listings)} listings across {max_pages} pages")
+    
+    return result
 
 
 async def run(url: str, output: Path, headless: bool = True, compare_file: Path = None):
@@ -265,33 +330,33 @@ async def run(url: str, output: Path, headless: bool = True, compare_file: Path 
     # Save current listings if output file specified
     if output:
         current_listings.to_json_file(output)
-        print(f"Wrote {len(current_listings)} listings to {output}")
+        logger.info(f"Wrote {len(current_listings)} listings to {output}")
     
     # Compare with previous listings if provided
     if compare_file and compare_file.exists():
         previous_listings = CurrentListings.from_json_file(compare_file)
         comparison = current_listings.compare_with(previous_listings)
         
-        print(f"\n=== COMPARISON RESULTS ===")
-        print(f"New listings: {len(comparison['new'])}")
-        print(f"Removed listings: {len(comparison['removed'])}")
-        print(f"Updated listings: {len(comparison['updated'])}")
+        logger.info(f"\n=== COMPARISON RESULTS ===")
+        logger.info(f"New listings: {len(comparison['new'])}")
+        logger.info(f"Removed listings: {len(comparison['removed'])}")
+        logger.info(f"Updated listings: {len(comparison['updated'])}")
         
         if comparison['new']:
-            print(f"\n=== NEW LISTINGS ===")
+            logger.info(f"\n=== NEW LISTINGS ===")
             for bike in comparison['new']:
-                print(f"🆕 {bike.title} - {bike.price} - {bike.location}")
-                print(f"   {bike.href}")
+                logger.info(f"🆕 {bike.title} - {bike.price} - {bike.location}")
+                logger.info(f"   {bike.href}")
         
         if comparison['removed']:
-            print(f"\n=== REMOVED LISTINGS ===")
+            logger.info(f"\n=== REMOVED LISTINGS ===")
             for bike in comparison['removed']:
-                print(f"❌ {bike.title} - {bike.price} - {bike.location}")
+                logger.info(f"❌ {bike.title} - {bike.price} - {bike.location}")
         
         if comparison['updated']:
-            print(f"\n=== UPDATED LISTINGS ===")
+            logger.info(f"\n=== UPDATED LISTINGS ===")
             for bike in comparison['updated']:
-                print(f"🔄 {bike.title} - {bike.price} - {bike.location}")
+                logger.info(f"🔄 {bike.title} - {bike.price} - {bike.location}")
     
     return current_listings
 

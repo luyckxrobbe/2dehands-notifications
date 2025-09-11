@@ -11,8 +11,194 @@ import time
 import glob
 import concurrent.futures
 import threading
+import logging
+import queue
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
+from datetime import datetime, time as dt_time
+
+from centralized_logging import setup_logging, get_logger
+
+# Configure logging
+setup_logging()
+logger = get_logger(__name__)
+
+
+class CentralizedScheduler:
+    """
+    Centralized scheduler that manages timing intervals for all monitors
+    and runs them sequentially to avoid simultaneous scraping.
+    """
+    
+    def __init__(self, configs: List[Dict[str, Any]], centralized_config: Dict[str, Any] = None):
+        """
+        Initialize the centralized scheduler.
+        
+        Args:
+            configs: List of configuration dictionaries for all monitors
+            centralized_config: Centralized configuration dictionary
+        """
+        self.configs = configs
+        self.centralized_config = centralized_config or {}
+        self.running = False
+        self.monitors = []  # List of (config_file, process, stdout_thread, stderr_thread)
+        self.process_counter = 1
+        
+        # Use centralized config for timing, fallback to calculating from monitor configs
+        if self.centralized_config.get('centralized_timing'):
+            timing_config = self.centralized_config['centralized_timing']
+            self.base_interval = timing_config.get('base_interval', 300)
+            self.time_based_intervals = timing_config.get('time_based_intervals', {})
+            self.monitor_delay = timing_config.get('monitor_delay', 10)
+            logger.info(f"🕐 Using centralized timing config - base interval: {self.base_interval} seconds")
+        else:
+            # Fallback to calculating from monitor configs
+            self.base_interval = self._calculate_base_interval()
+            self.time_based_intervals = {}
+            self.monitor_delay = 10
+            logger.info(f"🕐 Centralized scheduler using calculated base interval: {self.base_interval} seconds")
+        
+    def _calculate_base_interval(self) -> int:
+        """
+        Calculate the most frequent (shortest) interval across all configs.
+        This will be our base interval for the centralized scheduler.
+        """
+        min_interval = float('inf')
+        
+        for config in self.configs:
+            # Check time-based intervals
+            time_intervals = config.get('time_based_intervals', {})
+            if time_intervals:
+                for interval in time_intervals.values():
+                    min_interval = min(min_interval, interval)
+            
+            # Check default interval
+            default_interval = config.get('check_interval', 300)
+            min_interval = min(min_interval, default_interval)
+        
+        return int(min_interval) if min_interval != float('inf') else 300
+    
+    def _get_current_interval(self) -> int:
+        """
+        Get the current interval based on the time of day.
+        Uses centralized timing config if available, otherwise falls back to monitor configs.
+        """
+        current_time = datetime.now().time()
+        
+        # Use centralized time-based intervals if available
+        if self.time_based_intervals:
+            for time_range, interval in self.time_based_intervals.items():
+                start_str, end_str = time_range.split('-')
+                start_time = dt_time.fromisoformat(start_str)
+                end_time = dt_time.fromisoformat(end_str)
+                
+                # Handle the case where the range crosses midnight
+                if start_time <= end_time:
+                    if start_time <= current_time <= end_time:
+                        return interval
+                else:
+                    if current_time >= start_time or current_time <= end_time:
+                        return interval
+        
+        # Fallback: Check all time-based intervals from all configs
+        for config in self.configs:
+            time_intervals = config.get('time_based_intervals', {})
+            if time_intervals:
+                for time_range, interval in time_intervals.items():
+                    start_str, end_str = time_range.split('-')
+                    start_time = dt_time.fromisoformat(start_str)
+                    end_time = dt_time.fromisoformat(end_str)
+                    
+                    # Handle the case where the range crosses midnight
+                    if start_time <= end_time:
+                        if start_time <= current_time <= end_time:
+                            return interval
+                    else:
+                        if current_time >= start_time or current_time <= end_time:
+                            return interval
+        
+        # Fallback to base interval
+        return self.base_interval
+    
+    def add_monitor(self, config_file: str, process: subprocess.Popen, 
+                   stdout_thread: threading.Thread, stderr_thread: threading.Thread):
+        """
+        Add a monitor to the scheduler.
+        
+        Args:
+            config_file: Path to the config file
+            process: The subprocess for the monitor
+            stdout_thread: Thread handling stdout
+            stderr_thread: Thread handling stderr
+        """
+        self.monitors.append((config_file, process, stdout_thread, stderr_thread))
+        logger.info(f"📋 Added monitor to scheduler: {config_file}")
+    
+    async def trigger_check(self):
+        """
+        Trigger a check for all monitors sequentially.
+        """
+        if not self.monitors:
+            return
+        
+        logger.info(f"🔄 Triggering sequential check for {len(self.monitors)} monitors...")
+        
+        for i, (config_file, process, stdout_thread, stderr_thread) in enumerate(self.monitors):
+            if process.poll() is not None:
+                logger.warning(f"⚠️  Monitor {config_file} is not running, skipping...")
+                continue
+            
+            logger.info(f"🚀 [{i+1}/{len(self.monitors)}] Triggering check for: {config_file}")
+            
+            # Send SIGUSR1 signal to trigger a check (we'll need to modify bike_monitor.py to handle this)
+            try:
+                process.send_signal(subprocess.signal.SIGUSR1)
+            except Exception as e:
+                logger.error(f"❌ Error triggering check for {config_file}: {e}")
+            
+            # Wait a bit between monitors to spread the load
+            await asyncio.sleep(self.monitor_delay)
+        
+        logger.info("✅ Sequential check cycle completed")
+    
+    async def run(self):
+        """
+        Run the centralized scheduler loop.
+        """
+        self.running = True
+        logger.info("🕐 Starting centralized scheduler...")
+        
+        while self.running:
+            try:
+                current_interval = self._get_current_interval()
+                
+                # Log interval change if it's different from the last one
+                if hasattr(self, '_last_interval') and self._last_interval != current_interval:
+                    logger.info(f"⏰ Interval changed to {current_interval} seconds ({current_interval/60:.1f} minutes)")
+                elif not hasattr(self, '_last_interval'):
+                    logger.info(f"⏰ Using interval: {current_interval} seconds ({current_interval/60:.1f} minutes)")
+                
+                self._last_interval = current_interval
+                
+                # Wait for the interval
+                await asyncio.sleep(current_interval)
+                
+                if self.running:
+                    await self.trigger_check()
+                    
+            except asyncio.CancelledError:
+                logger.info("🛑 Scheduler cancelled")
+                break
+            except Exception as e:
+                logger.error(f"❌ Error in scheduler loop: {e}")
+                await asyncio.sleep(10)  # Wait a bit before retrying
+    
+    def stop(self):
+        """
+        Stop the centralized scheduler.
+        """
+        logger.info("🛑 Stopping centralized scheduler...")
+        self.running = False
 
 
 def load_config(config_file: str) -> Dict[str, Any]:
@@ -29,7 +215,31 @@ def load_config(config_file: str) -> Dict[str, Any]:
         with open(config_file, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        print(f"❌ Error loading config {config_file}: {e}")
+        logger.error(f"❌ Error loading config {config_file}: {e}")
+        return {}
+
+
+def load_centralized_config(config_file: str = "configs/centralized-config.json") -> Dict[str, Any]:
+    """
+    Load centralized configuration from JSON file.
+    
+    Args:
+        config_file: Path to the centralized configuration file
+        
+    Returns:
+        Centralized configuration dictionary
+    """
+    try:
+        if Path(config_file).exists():
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                logger.info(f"✅ Loaded centralized config from {config_file}")
+                return config
+        else:
+            logger.warning(f"⚠️  Centralized config file not found: {config_file}")
+            return {}
+    except Exception as e:
+        logger.error(f"❌ Error loading centralized config {config_file}: {e}")
         return {}
 
 
@@ -43,7 +253,7 @@ def run_init_buffer(config_file: str) -> Tuple[str, bool]:
     Returns:
         Tuple of (config_file, success_status)
     """
-    print(f"🔄 Initializing buffer for: {config_file}")
+    logger.info(f"🔄 Initializing buffer for: {config_file}")
     
     try:
         # Run init_buffer.py with the config file
@@ -55,19 +265,90 @@ def run_init_buffer(config_file: str) -> Tuple[str, bool]:
         )
         
         if result.returncode == 0:
-            print(f"✅ Buffer initialization successful for: {config_file}")
+            logger.info(f"✅ Buffer initialization successful for: {config_file}")
             return (config_file, True)
         else:
-            print(f"❌ Buffer initialization failed for: {config_file}")
-            print(f"Error: {result.stderr}")
+            logger.error(f"❌ Buffer initialization failed for: {config_file}")
+            logger.error(f"Error: {result.stderr}")
             return (config_file, False)
             
     except subprocess.TimeoutExpired:
-        print(f"⏰ Buffer initialization timed out for: {config_file}")
+        logger.error(f"⏰ Buffer initialization timed out for: {config_file}")
         return (config_file, False)
     except Exception as e:
-        print(f"❌ Error running buffer initialization for: {config_file}: {e}")
+        logger.error(f"❌ Error running buffer initialization for: {config_file}: {e}")
         return (config_file, False)
+
+
+async def wait_for_initial_check_completion(process: subprocess.Popen, config_file: str):
+    """
+    Wait for a monitor to complete its initial check by monitoring its output.
+    
+    Args:
+        process: The subprocess to monitor
+        config_file: Config file name for identification
+    """
+    logger.info(f"   Monitoring {config_file} for initial check completion...")
+    
+    # Wait for the process to output the completion message
+    # We'll look for messages that indicate the initial check is done
+    completion_indicators = [
+        "Initial buffer building complete",
+        "Bike listing check completed successfully",
+        "Rolling window now contains",
+        "Starting ongoing bike listing check"
+    ]
+    
+    # Create a temporary output reader to monitor for completion
+    
+    output_queue = queue.Queue()
+    
+    def read_output():
+        try:
+            for line in iter(process.stderr.readline, b''):
+                if line:
+                    line_str = line.decode('utf-8').rstrip()
+                    output_queue.put(line_str)
+        except Exception:
+            pass
+    
+    # Start reading output in a separate thread
+    reader_thread = threading.Thread(target=read_output, daemon=True)
+    reader_thread.start()
+    
+    # Wait for completion indicators
+    timeout_seconds = 300  # 5 minutes timeout
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout_seconds:
+        try:
+            # Check if process is still running
+            if process.poll() is not None:
+                logger.warning(f"   Process {config_file} stopped unexpectedly during initial check")
+                break
+            
+            # Check for completion indicators in the output queue
+            try:
+                line = output_queue.get_nowait()
+                for indicator in completion_indicators:
+                    if indicator in line:
+                        logger.info(f"   ✅ {config_file} initial check completed")
+                        return
+            except queue.Empty:
+                pass
+            
+            # Wait a bit before checking again
+            await asyncio.sleep(1)
+            
+        except Exception as e:
+            logger.error(f"   Error monitoring {config_file}: {e}")
+            break
+    
+    # If we get here, either timeout or error occurred
+    if time.time() - start_time >= timeout_seconds:
+        logger.warning(f"   ⏰ Timeout waiting for {config_file} initial check completion")
+    else:
+        logger.info(f"   ✅ {config_file} initial check completed (or process finished)")
 
 
 def stream_output(process: subprocess.Popen, prefix: str, config_file: str):
@@ -83,17 +364,47 @@ def stream_output(process: subprocess.Popen, prefix: str, config_file: str):
         try:
             for line in iter(process.stdout.readline, b''):
                 if line:
-                    print(f"{prefix} {line.decode('utf-8').rstrip()}")
+                    line_str = line.decode('utf-8').rstrip()
+                    # Extract just the message part, removing the log header
+                    clean_message = extract_log_message(line_str)
+                    logger.info(f"{prefix} {clean_message}")
         except Exception as e:
-            print(f"{prefix} Error reading stdout: {e}")
+            logger.error(f"{prefix} Error reading stdout: {e}")
     
     def read_stderr():
         try:
             for line in iter(process.stderr.readline, b''):
                 if line:
-                    print(f"{prefix} {line.decode('utf-8').rstrip()}")
+                    line_str = line.decode('utf-8').rstrip()
+                    # Extract just the message part, removing the log header
+                    clean_message = extract_log_message(line_str)
+                    
+                    # Parse the log level from the original line and use appropriate logger level
+                    if ' - ERROR - ' in line_str:
+                        logger.error(f"{prefix} {clean_message}")
+                    elif ' - WARNING - ' in line_str:
+                        logger.warning(f"{prefix} {clean_message}")
+                    elif ' - DEBUG - ' in line_str:
+                        logger.debug(f"{prefix} {clean_message}")
+                    else:
+                        # Default to info for INFO level and other messages
+                        logger.info(f"{prefix} {clean_message}")
         except Exception as e:
-            print(f"{prefix} Error reading stderr: {e}")
+            logger.error(f"{prefix} Error reading stderr: {e}")
+    
+    def extract_log_message(line_str):
+        """
+        Extract the actual message from a log line, removing the timestamp and log level header.
+        Expected format: "2025-09-11 08:33:49,785 - __main__ - INFO - actual message here"
+        """
+        # Look for the pattern: timestamp - logger_name - level - message
+        parts = line_str.split(' - ', 3)
+        if len(parts) >= 4:
+            # Return just the message part (everything after the third ' - ')
+            return parts[3]
+        else:
+            # If it doesn't match the expected format, return the whole line
+            return line_str
     
     # Start threads for stdout and stderr
     stdout_thread = threading.Thread(target=read_stdout, daemon=True)
@@ -108,6 +419,7 @@ def stream_output(process: subprocess.Popen, prefix: str, config_file: str):
 def run_monitor(config_file: str, process_id: int) -> Tuple[subprocess.Popen, threading.Thread, threading.Thread]:
     """
     Start a monitor process for the given config file with output streaming.
+    The monitor will run in centralized mode (no internal timing loop).
     
     Args:
         config_file: Path to the JSON configuration file
@@ -124,7 +436,10 @@ def run_monitor(config_file: str, process_id: int) -> Tuple[subprocess.Popen, th
     if skip_initial:
         cmd.append("--skip-initial")
     
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1)
+    # Add centralized mode flag
+    cmd.append("--centralized")
+    
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     
     # Create prefix based on process ID and config file name
     config_name = Path(config_file).stem
@@ -140,6 +455,7 @@ def find_config_files(paths: List[str]) -> List[str]:
     """
     Find all config files from the given paths.
     Supports both individual files and folders.
+    Excludes centralized-config.json as it's not a monitor config.
     
     Args:
         paths: List of file paths or folder paths
@@ -154,36 +470,38 @@ def find_config_files(paths: List[str]) -> List[str]:
         
         if path_obj.is_file():
             # Single file
-            if path.endswith('.json'):
+            if path.endswith('.json') and not path.endswith('centralized-config.json'):
                 config_files.append(str(path_obj))
             else:
-                print(f"⚠️  Skipping non-JSON file: {path}")
+                logger.warning(f"⚠️  Skipping non-JSON file: {path}")
         elif path_obj.is_dir():
-            # Folder - find all JSON files
+            # Folder - find all JSON files except centralized-config.json
             json_files = list(path_obj.glob('*.json'))
-            if json_files:
-                print(f"📁 Found {len(json_files)} config files in {path}:")
-                for json_file in sorted(json_files):
-                    print(f"   - {json_file.name}")
+            # Filter out centralized-config.json
+            monitor_config_files = [f for f in json_files if f.name != 'centralized-config.json']
+            if monitor_config_files:
+                logger.info(f"📁 Found {len(monitor_config_files)} monitor config files in {path}:")
+                for json_file in sorted(monitor_config_files):
+                    logger.info(f"   - {json_file.name}")
                     config_files.append(str(json_file))
             else:
-                print(f"⚠️  No JSON files found in folder: {path}")
+                logger.warning(f"⚠️  No monitor config files found in folder: {path}")
         else:
             # Try glob pattern
             try:
                 glob_files = glob.glob(path)
                 if glob_files:
                     for glob_file in glob_files:
-                        if Path(glob_file).is_file() and glob_file.endswith('.json'):
+                        if Path(glob_file).is_file() and glob_file.endswith('.json') and not glob_file.endswith('centralized-config.json'):
                             config_files.append(glob_file)
                         elif Path(glob_file).is_dir():
                             # Recursively find JSON files in glob-matched directories
                             sub_files = find_config_files([glob_file])
                             config_files.extend(sub_files)
                 else:
-                    print(f"⚠️  No files found matching pattern: {path}")
+                    logger.warning(f"⚠️  No files found matching pattern: {path}")
             except Exception as e:
-                print(f"⚠️  Error processing path {path}: {e}")
+                logger.warning(f"⚠️  Error processing path {path}: {e}")
     
     # Remove duplicates while preserving order
     seen = set()
@@ -196,30 +514,33 @@ def find_config_files(paths: List[str]) -> List[str]:
     return unique_config_files
 
 
-def main():
+async def main():
     """
-    Main function to run multiple monitors with optional buffer initialization.
+    Main function to run multiple monitors with centralized timing.
     """
     if len(sys.argv) < 2:
-        print("Usage: python run_monitors.py <config1.json> [config2.json] ... [folder/] [*.json]")
-        print()
-        print("Examples:")
-        print("  python run_monitors.py config-2dehands.json")
-        print("  python run_monitors.py config-2dehands.json config-marktplaats.json")
-        print("  python run_monitors.py configs/")
-        print("  python run_monitors.py configs/*.json")
-        print("  python run_monitors.py configs/ config-2dehands.json")
-        print()
-        print("Features:")
-        print("  - Automatically initializes buffer if 'init_buffer': true in config")
-        print("  - Starts monitors immediately for configs that don't need buffer initialization")
-        print("  - Runs buffer initialization in parallel (up to 4 concurrent)")
-        print("  - Starts monitors as soon as their buffer initialization completes")
-        print("  - Staggered startup (2-minute delay between monitors) to spread scraping load")
-        print("  - Supports folders (finds all *.json files)")
-        print("  - Supports glob patterns")
-        print("  - Handles graceful shutdown with Ctrl+C")
-        print("  - Real-time output streaming with process prefixes")
+        logger.info("Usage: python run_monitors.py <config1.json> [config2.json] ... [folder/] [*.json]")
+        logger.info("")
+        logger.info("Examples:")
+        logger.info("  python run_monitors.py config-2dehands.json")
+        logger.info("  python run_monitors.py config-2dehands.json config-marktplaats.json")
+        logger.info("  python run_monitors.py configs/")
+        logger.info("  python run_monitors.py configs/*.json")
+        logger.info("  python run_monitors.py configs/ config-2dehands.json")
+        logger.info("")
+        logger.info("Features:")
+        logger.info("  - Centralized timing scheduler prevents simultaneous scraping")
+        logger.info("  - Monitors run sequentially when triggered")
+        logger.info("  - Uses centralized-config.json for timing and scheduler settings")
+        logger.info("  - Automatically initializes buffer if 'init_buffer': true in config")
+        logger.info("  - Starts monitors immediately for configs that don't need buffer initialization")
+        logger.info("  - Runs buffer initialization in parallel (configurable concurrency)")
+        logger.info("  - Starts monitors as soon as their buffer initialization completes")
+        logger.info("  - Staggered startup (configurable delay between monitors)")
+        logger.info("  - Supports folders (finds all *.json files)")
+        logger.info("  - Supports glob patterns")
+        logger.info("  - Handles graceful shutdown with Ctrl+C")
+        logger.info("  - Real-time output streaming with process prefixes")
         sys.exit(1)
     
     # Find all config files from the provided paths
@@ -227,17 +548,35 @@ def main():
     config_files = find_config_files(input_paths)
     
     if not config_files:
-        print("❌ No valid config files found")
+        logger.error("❌ No valid config files found")
         sys.exit(1)
     
-    print(f"📋 Found {len(config_files)} config files to process")
-    print()
+    logger.info(f"📋 Found {len(config_files)} config files to process")
+    logger.info("")
+    
+    # Load centralized config
+    centralized_config = load_centralized_config()
+    
+    # Load all configs for the centralized scheduler
+    all_configs = []
+    for config_file in config_files:
+        if Path(config_file).exists():
+            config = load_config(config_file)
+            if config:
+                all_configs.append(config)
+    
+    if not all_configs:
+        logger.error("❌ No valid configs found")
+        sys.exit(1)
+    
+    # Create centralized scheduler with centralized config
+    scheduler = CentralizedScheduler(all_configs, centralized_config)
     
     processes = []
     process_counter = 1
     
-    print("🚴‍♂️ Starting multiple bike monitors...")
-    print()
+    logger.info("🚴‍♂️ Starting multiple bike monitors with centralized timing...")
+    logger.info("")
     
     # First, identify which configs need buffer initialization
     configs_needing_init = []
@@ -245,7 +584,7 @@ def main():
     
     for config_file in config_files:
         if not Path(config_file).exists():
-            print(f"❌ Config file not found: {config_file}")
+            logger.error(f"❌ Config file not found: {config_file}")
             continue
         
         # Load config to check if buffer initialization is needed
@@ -258,35 +597,50 @@ def main():
             # Check if backup file already exists
             backup_file = config.get('backup_file', '')
             if backup_file and Path(backup_file).exists():
-                print(f"⚠️  Backup file already exists: {backup_file}")
-                print(f"   Skipping buffer initialization for: {config_file}")
+                logger.warning(f"⚠️  Backup file already exists: {backup_file}")
+                logger.info(f"   Skipping buffer initialization for: {config_file}")
                 configs_ready_to_start.append(config_file)
             else:
-                print(f"📋 Config {config_file} needs buffer initialization")
+                logger.info(f"📋 Config {config_file} needs buffer initialization")
                 configs_needing_init.append(config_file)
         else:
             configs_ready_to_start.append(config_file)
     
     # Start monitors immediately for configs that don't need buffer initialization
     if configs_ready_to_start:
-        print(f"🚀 Starting {len(configs_ready_to_start)} monitors with staggered startup...")
+        logger.info(f"🚀 Starting {len(configs_ready_to_start)} monitors with staggered startup...")
+        
+        # Get startup delay from centralized config
+        startup_delay_minutes = 2  # default
+        if centralized_config.get('scheduler', {}).get('startup_delay_minutes'):
+            startup_delay_minutes = centralized_config['scheduler']['startup_delay_minutes']
         
         for i, config_file in enumerate(configs_ready_to_start):
             if i > 0:  # Add delay for all monitors except the first one
-                delay_minutes = 2
-                print(f"   Waiting {delay_minutes} minutes before starting next monitor...")
-                time.sleep(delay_minutes * 60)  # Convert minutes to seconds
+                logger.info(f"   Waiting {startup_delay_minutes} minutes before starting next monitor...")
+                time.sleep(startup_delay_minutes * 60)  # Convert minutes to seconds
             
-            print(f"   Starting monitor: {config_file}")
+            logger.info(f"   Starting monitor: {config_file}")
             process, stdout_thread, stderr_thread = run_monitor(config_file, process_counter)
             processes.append((config_file, process, stdout_thread, stderr_thread))
+            scheduler.add_monitor(config_file, process, stdout_thread, stderr_thread)
             process_counter += 1
+            
+            # For the first monitor, wait for it to complete its initial check before starting the next one
+            if i == 0 and len(configs_ready_to_start) > 1:
+                logger.info("   Waiting for first monitor to complete initial check...")
+                await wait_for_initial_check_completion(process, config_file)
     
     # Run buffer initialization in parallel for configs that need it
     if configs_needing_init:
-        print(f"🔄 Running buffer initialization for {len(configs_needing_init)} configs in parallel...")
+        logger.info(f"🔄 Running buffer initialization for {len(configs_needing_init)} configs in parallel...")
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(configs_needing_init), 4)) as executor:
+        # Get max concurrent workers from centralized config
+        max_workers = 4  # default
+        if centralized_config.get('scheduler', {}).get('max_concurrent_buffer_init'):
+            max_workers = centralized_config['scheduler']['max_concurrent_buffer_init']
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(configs_needing_init), max_workers)) as executor:
             # Submit all buffer initialization tasks
             future_to_config = {
                 executor.submit(run_init_buffer, config_file): config_file 
@@ -297,53 +651,45 @@ def main():
             for i, future in enumerate(concurrent.futures.as_completed(future_to_config)):
                 config_file, success = future.result()
                 if success:
-                    print(f"✅ Buffer initialized for: {config_file}")
+                    logger.info(f"✅ Buffer initialized for: {config_file}")
                     
                     # Add delay for monitors that start after buffer initialization
                     if i > 0:  # Add delay for all monitors except the first one
-                        delay_minutes = 2
-                        print(f"   Waiting {delay_minutes} minutes before starting next monitor...")
-                        time.sleep(delay_minutes * 60)  # Convert minutes to seconds
+                        logger.info(f"   Waiting {startup_delay_minutes} minutes before starting next monitor...")
+                        time.sleep(startup_delay_minutes * 60)  # Convert minutes to seconds
                     
-                    print(f"🚀 Starting monitor: {config_file}")
+                    logger.info(f"🚀 Starting monitor: {config_file}")
                     process, stdout_thread, stderr_thread = run_monitor(config_file, process_counter)
                     processes.append((config_file, process, stdout_thread, stderr_thread))
+                    scheduler.add_monitor(config_file, process, stdout_thread, stderr_thread)
                     process_counter += 1
                 else:
-                    print(f"❌ Failed to initialize buffer for: {config_file}")
-                    print(f"   Skipping monitor startup for: {config_file}")
+                    logger.error(f"❌ Failed to initialize buffer for: {config_file}")
+                    logger.info(f"   Skipping monitor startup for: {config_file}")
     
     if not processes:
-        print("❌ No configs ready to start")
+        logger.error("❌ No configs ready to start")
         sys.exit(1)
     
-    print(f"\n✅ Started {len(processes)} monitors")
-    print("Press Ctrl+C to stop all monitors")
-    print("Output format: [ID] config_name message")
-    print()
+    logger.info(f"\n✅ Started {len(processes)} monitors")
+    logger.info("Press Ctrl+C to stop all monitors")
+    logger.info("Output format: [ID] config_name message")
+    logger.info("Centralized timing: Monitors will run sequentially when triggered")
+    logger.info("")
     
     try:
-        # Wait for all processes
-        while True:
-            # Check if any process has died
-            for config_file, process, stdout_thread, stderr_thread in processes[:]:
-                if process.poll() is not None:
-                    print(f"⚠️  Monitor {config_file} stopped unexpectedly")
-                    processes.remove((config_file, process, stdout_thread, stderr_thread))
-            
-            if not processes:
-                print("❌ All monitors have stopped")
-                break
-            
-            # Wait a bit before checking again
-            time.sleep(5)
+        # Start the centralized scheduler
+        await scheduler.run()
     
     except KeyboardInterrupt:
-        print("\n🛑 Stopping all monitors...")
+        logger.info("\n🛑 Stopping all monitors...")
+        
+        # Stop the scheduler first
+        scheduler.stop()
         
         # Terminate all processes
         for config_file, process, stdout_thread, stderr_thread in processes:
-            print(f"Stopping: {config_file}")
+            logger.info(f"Stopping: {config_file}")
             process.terminate()
         
         # Wait for processes to terminate
@@ -351,11 +697,11 @@ def main():
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                print(f"Force killing: {config_file}")
+                logger.warning(f"Force killing: {config_file}")
                 process.kill()
         
-        print("✅ All monitors stopped")
+        logger.info("✅ All monitors stopped")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

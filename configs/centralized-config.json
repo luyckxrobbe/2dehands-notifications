@@ -1,0 +1,24 @@
+{
+  "centralized_timing": {
+    "base_interval": 300,
+    "time_based_intervals": {
+      "01:00-07:00": 3600,
+      "07:00-16:00": 600,
+      "16:00-22:00": 300,
+      "22:00-01:00": 600
+    },
+    "monitor_delay": 10,
+    "description": "Centralized timing configuration for all monitors"
+  },
+  "scheduler": {
+    "max_concurrent_buffer_init": 4,
+    "startup_delay_minutes": 2,
+    "description": "Scheduler behavior settings"
+  },
+  "monitoring": {
+    "enable_telegram_startup": true,
+    "enable_telegram_shutdown": true,
+    "log_level": "INFO",
+    "description": "General monitoring settings"
+  }
+}

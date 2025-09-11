@@ -5,23 +5,31 @@ Setup script for the bike monitor system.
 
 import os
 import sys
+import logging
 from pathlib import Path
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 def create_env_file():
     """
     Create a .env file with Telegram bot configuration.
     """
-    print("🚴‍♂️ Bike Monitor Setup")
-    print("=" * 50)
-    print()
+    logger.info("🚴‍♂️ Bike Monitor Setup")
+    logger.info("=" * 50)
+    logger.info("")
     
     # Check if .env already exists
     env_file = Path('.env')
     if env_file.exists():
         response = input(".env file already exists. Overwrite? (y/N): ").lower()
         if response != 'y':
-            print("Setup cancelled.")
+            logger.info("Setup cancelled.")
             return
     
     print("Please provide the following information:")
@@ -92,7 +100,7 @@ def create_config_file():
     if Path(config_file).exists():
         response = input(f"{config_file} already exists. Overwrite? (y/N): ").lower()
         if response != 'y':
-            print("Setup cancelled.")
+            logger.info("Setup cancelled.")
             return
     
     print()

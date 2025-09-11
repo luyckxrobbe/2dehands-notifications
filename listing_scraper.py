@@ -4,6 +4,7 @@ Scraper for individual 2dehands listing pages to extract detailed information.
 
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,11 @@ from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import Page
 from web_navigator import WebNavigator
+from centralized_logging import setup_logging, get_logger
+
+# Set up centralized logging
+setup_logging()
+logger = get_logger(__name__)
 
 
 class ListingScraper:
@@ -66,7 +72,7 @@ class ListingScraper:
             return listing_data
             
         except Exception as e:
-            print(f"Error scraping listing {url}: {e}")
+            logger.error(f"Error scraping listing {url}: {e}")
             return {}
         finally:
             await page.close()
@@ -193,17 +199,46 @@ class ListingScraper:
     async def _extract_date_posted(self, page: Page) -> Optional[str]:
         """Extract the date when the listing was posted."""
         try:
-            # Look for date information in stats section
+            # Look for date information in Report-stats section
             stats_element = await page.query_selector('.Report-stats')
             if stats_element:
-                # Look for date in the stats
-                date_element = await stats_element.query_selector('[title*="sep"], [title*="jan"], [title*="feb"], [title*="mrt"], [title*="apr"], [title*="mei"], [title*="jun"], [title*="jul"], [title*="aug"], [title*="okt"], [title*="nov"], [title*="dec"]')
-                if date_element:
+                # Look for Report-stat elements with title attributes containing dates
+                date_elements = await stats_element.query_selector_all('.Report-stat[title*="sep"], .Report-stat[title*="jan"], .Report-stat[title*="feb"], .Report-stat[title*="mrt"], .Report-stat[title*="apr"], .Report-stat[title*="mei"], .Report-stat[title*="jun"], .Report-stat[title*="jul"], .Report-stat[title*="aug"], .Report-stat[title*="okt"], .Report-stat[title*="nov"], .Report-stat[title*="dec"]')
+                
+                for date_element in date_elements:
                     date_text = await date_element.get_attribute('title')
                     if date_text:
-                        return self._parse_date(date_text)
+                        parsed_date = self._parse_date(date_text)
+                        if parsed_date:
+                            return parsed_date
+                
+                # Also try to find elements with "Sinds" text
+                since_elements = await stats_element.query_selector_all('.Report-stat')
+                for since_element in since_elements:
+                    text_content = await since_element.text_content()
+                    if text_content and 'sinds' in text_content.lower():
+                        # Try to extract date from the text content
+                        parsed_date = self._parse_date(text_content)
+                        if parsed_date:
+                            return parsed_date
+                        
+                        # Also try the title attribute
+                        title_text = await since_element.get_attribute('title')
+                        if title_text:
+                            parsed_date = self._parse_date(title_text)
+                            if parsed_date:
+                                return parsed_date
             
-            # Try to find "Sinds" text
+            # Fallback: Try to find any element with date-like title attributes
+            date_elements = await page.query_selector_all('[title*="sep"], [title*="jan"], [title*="feb"], [title*="mrt"], [title*="apr"], [title*="mei"], [title*="jun"], [title*="jul"], [title*="aug"], [title*="okt"], [title*="nov"], [title*="dec"]')
+            for date_element in date_elements:
+                date_text = await date_element.get_attribute('title')
+                if date_text:
+                    parsed_date = self._parse_date(date_text)
+                    if parsed_date:
+                        return parsed_date
+            
+            # Last resort: Try to find "Sinds" text anywhere on the page
             since_element = await page.query_selector('text="Sinds"')
             if since_element:
                 parent = await since_element.query_selector('xpath=..')
@@ -212,8 +247,23 @@ class ListingScraper:
                     if date_text:
                         return self._parse_date(date_text)
             
+            # If we still haven't found a date, log some debug information
+            logger.debug(f"Could not extract date from page. URL: {page.url}")
+            
+            # Try to get some debug info about what's on the page
+            try:
+                stats_element = await page.query_selector('.Report-stats')
+                if stats_element:
+                    stats_html = await stats_element.inner_html()
+                    logger.debug(f"Report-stats HTML: {stats_html[:500]}...")
+                else:
+                    logger.debug("No .Report-stats element found on page")
+            except Exception:
+                pass
+            
             return None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error extracting date: {e}")
             return None
     
     def _parse_date(self, date_text: str) -> Optional[str]:
@@ -222,12 +272,15 @@ class ListingScraper:
             # Remove extra text and clean up
             date_text = date_text.lower().strip()
             
-            # Look for patterns like "7 sep. '25, 17:15" or "Sinds 7 sep. '25"
-            date_match = re.search(r'(\d{1,2})\s+(jan|feb|mrt|apr|mei|jun|jul|aug|sep|okt|nov|dec)\.?\s*\'?(\d{2,4})', date_text)
+            # Look for patterns like "4 sep. '25, 15:55" or "Sinds 4 sep. '25" or "7 sep. '25, 17:15"
+            # Updated regex to capture time as well
+            date_match = re.search(r'(\d{1,2})\s+(jan|feb|mrt|apr|mei|jun|jul|aug|sep|okt|nov|dec)\.?\s*\'?(\d{2,4})(?:,\s*(\d{1,2}):(\d{2}))?', date_text)
             if date_match:
                 day = int(date_match.group(1))
                 month_str = date_match.group(2)
                 year_str = date_match.group(3)
+                hour_str = date_match.group(4)
+                minute_str = date_match.group(5)
                 
                 # Convert Dutch month names
                 month_map = {
@@ -242,13 +295,65 @@ class ListingScraper:
                 else:
                     year = int(year_str)
                 
-                # Create datetime object
-                dt = datetime(year, month, day, tzinfo=timezone.utc)
+                # Handle time (default to 0:0 if not provided)
+                hour = int(hour_str) if hour_str else 0
+                minute = int(minute_str) if minute_str else 0
+                
+                # Create datetime object with time
+                dt = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+                return dt.isoformat()
+            
+            # Also try to match patterns without the apostrophe in year
+            date_match = re.search(r'(\d{1,2})\s+(jan|feb|mrt|apr|mei|jun|jul|aug|sep|okt|nov|dec)\.?\s+(\d{2,4})(?:,\s*(\d{1,2}):(\d{2}))?', date_text)
+            if date_match:
+                day = int(date_match.group(1))
+                month_str = date_match.group(2)
+                year_str = date_match.group(3)
+                hour_str = date_match.group(4)
+                minute_str = date_match.group(5)
+                
+                # Convert Dutch month names
+                month_map = {
+                    'jan': 1, 'feb': 2, 'mrt': 3, 'apr': 4, 'mei': 5, 'jun': 6,
+                    'jul': 7, 'aug': 8, 'sep': 9, 'okt': 10, 'nov': 11, 'dec': 12
+                }
+                month = month_map.get(month_str, 1)
+                
+                # Handle year
+                if len(year_str) == 2:
+                    year = 2000 + int(year_str)
+                else:
+                    year = int(year_str)
+                
+                # Handle time (default to 0:0 if not provided)
+                hour = int(hour_str) if hour_str else 0
+                minute = int(minute_str) if minute_str else 0
+                
+                # Create datetime object with time
+                dt = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
                 return dt.isoformat()
             
             return None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error parsing date '{date_text}': {e}")
             return None
+    
+    def test_date_parsing(self):
+        """Test method to verify date parsing works with various formats."""
+        test_cases = [
+            "4 sep. '25, 15:55",
+            "Sinds 4 sep. '25",
+            "7 sep. '25, 17:15",
+            "Sinds 7 sep. '25",
+            "15 jan. '25",
+            "Sinds 15 jan. '25",
+            "3 mrt. '25, 09:30",
+            "Sinds 3 mrt. '25"
+        ]
+        
+        for test_case in test_cases:
+            result = self._parse_date(test_case)
+            logger.info(f"Date parsing test: '{test_case}' -> '{result}'")
     
     async def _extract_seller_info(self, page: Page) -> Dict[str, Any]:
         """Extract seller information."""
@@ -439,17 +544,17 @@ async def main():
     # Test with the provided HTML file URL
     test_url = "https://www.2dehands.be/v/fietsen-en-brommers/fietsen-racefietsen/m2308511301-specialized-tarmac-sl6-s-works-54cm"
     
-    print(f"Scraping listing: {test_url}")
+    logger.info(f"Scraping listing: {test_url}")
     
     result = await scrape_listing(test_url, headless=False)
     
-    print("\nScraped data:")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    logger.info("\nScraped data:")
+    logger.info(json.dumps(result, indent=2, ensure_ascii=False))
     
     # Check if it's from today
     scraper = ListingScraper()
     is_today = scraper.is_today(result.get('date_posted'))
-    print(f"\nIs from today: {is_today}")
+    logger.info(f"\nIs from today: {is_today}")
 
 
 if __name__ == "__main__":

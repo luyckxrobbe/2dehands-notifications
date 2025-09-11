@@ -5,9 +5,12 @@ WebNavigator class for centralized web navigation with proxy support.
 
 import asyncio
 import random
+import logging
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+
+logger = logging.getLogger(__name__)
 
 
 class WebNavigator:
@@ -189,7 +192,7 @@ class WebNavigator:
             return True
             
         except Exception as e:
-            print(f"Navigation failed for {url}: {e}")
+            logger.error(f"Navigation failed for {url}: {e}")
             return False
     
     async def handle_cookie_banner(self, page: Page) -> None:
@@ -359,7 +362,7 @@ class WebNavigator:
                 await element.click(timeout=timeout)
                 return True
         except Exception as e:
-            print(f"Click failed for selector {selector}: {e}")
+            logger.error(f"Click failed for selector {selector}: {e}")
         return False
     
     async def wait_for_consent_banner_dismissed(self, page: Page, timeout: int = 5000) -> bool:

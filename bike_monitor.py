@@ -21,20 +21,14 @@ from current_listings import CurrentListings
 from bike import Bike
 from telegram_bot import TelegramBot
 from listing_scraper import ListingScraper
+from centralized_logging import setup_logging, get_logger
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler('bike_monitor.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+# Set up centralized logging
+setup_logging(log_file='bike_monitor.log')
+logger = get_logger(__name__)
 
 
 class BikeMonitor:
@@ -42,13 +36,14 @@ class BikeMonitor:
     Continuous bike monitoring system that checks for new listings and sends notifications.
     """
     
-    def __init__(self, config: Dict[str, Any], skip_initial: bool = False):
+    def __init__(self, config: Dict[str, Any], skip_initial: bool = False, centralized: bool = False):
         """
         Initialize the bike monitor from configuration.
         
         Args:
             config: Configuration dictionary with monitor settings
             skip_initial: If True, skip the initial buffer building phase
+            centralized: If True, run in centralized mode (wait for signals)
         """
         self.url = config['url']
         self.check_interval = config['check_interval']
@@ -71,6 +66,7 @@ class BikeMonitor:
         self.request_delay = config.get('request_delay', 1.0)
         
         self.running = False
+        self.centralized = centralized
         
         # Try to load existing buffer from backup file
         if self.backup_file and self.backup_file.exists():
@@ -224,7 +220,21 @@ class BikeMonitor:
         message += f"<b>Size:</b> {frame_size}\n"
         message += f"<b>Location:</b> {bike.location}\n"
         message += f"<b>Seller:</b> {bike.seller}\n"
-        message += f"<b>Date:</b> {bike.date}\n\n"
+        # Format date with time if available
+        date_display = bike.date
+        if detailed_info and detailed_info.get('date_posted'):
+            try:
+                # Parse the ISO date to extract time
+                from datetime import datetime
+                parsed_date = datetime.fromisoformat(detailed_info['date_posted'].replace('Z', '+00:00'))
+                # Format as "4 sep. '25, 15:55" style
+                time_str = parsed_date.strftime('%H:%M')
+                date_display = f"{bike.date}, {time_str}"
+            except Exception:
+                # If parsing fails, just use the original date
+                pass
+        
+        message += f"<b>Date:</b> {date_display}\n\n"
         
         # Add detailed specifications if available
         if detailed_info and detailed_info.get('specifications'):
@@ -312,6 +322,11 @@ class BikeMonitor:
                     detailed_info = await self.listing_scraper.scrape_listing(bike.href)
                     
                     # Check if it's from today
+                    if detailed_info and detailed_info.get('date_posted'):
+                        logger.debug(f"Found date_posted for {bike.title}: {detailed_info['date_posted']}")
+                    else:
+                        logger.debug(f"No date_posted found for {bike.title}. Detailed info keys: {list(detailed_info.keys()) if detailed_info else 'None'}")
+                    
                     if detailed_info and detailed_info.get('date_posted'):
                         scraper = ListingScraper(
                             headless=True,
@@ -406,6 +421,14 @@ class BikeMonitor:
                 logger.info(f"Found {initial_new_count} listings not in rolling window")
                 logger.info(f"After duplicate detection: {len(truly_new_bikes)} truly new listings")
                 
+                # Check if we found too many new bikes (monitor was likely offline)
+                if len(truly_new_bikes) > 20:
+                    logger.info(f"Found {len(truly_new_bikes)} new bikes (>20) - monitor was likely offline. Adding all to buffer without notifications.")
+                    # Just add all bikes to cache without processing notifications
+                    self.previous_listings.add_bikes(truly_new_bikes)
+                    logger.info(f"Added {len(truly_new_bikes)} bikes to buffer (no notifications sent)")
+                    return
+                
                 # Process truly new bikes and add them to cache after processing
                 notifications_sent = 0
                 processed_bikes = []
@@ -467,13 +490,16 @@ class BikeMonitor:
         startup_message = f"🚴‍♂️ <b>Enhanced Bike Monitor Started</b>\n\n"
         startup_message += f"Monitoring: {self.url}\n"
         
-        if self.time_based_intervals:
-            startup_message += f"Time-based intervals:\n"
-            for time_range, interval in self.time_based_intervals.items():
-                startup_message += f"• {time_range}: {interval/60:.0f} minutes\n"
-            startup_message += f"Default interval: {self.check_interval} seconds\n"
+        if self.centralized:
+            startup_message += f"Mode: Centralized (signal-triggered)\n"
         else:
-            startup_message += f"Check interval: {self.check_interval} seconds\n"
+            if self.time_based_intervals:
+                startup_message += f"Time-based intervals:\n"
+                for time_range, interval in self.time_based_intervals.items():
+                    startup_message += f"• {time_range}: {interval/60:.0f} minutes\n"
+                startup_message += f"Default interval: {self.check_interval} seconds\n"
+            else:
+                startup_message += f"Check interval: {self.check_interval} seconds\n"
         
         startup_message += f"Buffer size: {self.max_bikes} bikes\n"
         if self.is_initial_run:
@@ -494,7 +520,17 @@ class BikeMonitor:
         # Initial check
         await self.check_for_new_listings()
         
-        # Main monitoring loop
+        if self.centralized:
+            # In centralized mode, wait for signals
+            await self._run_centralized()
+        else:
+            # Original timing-based loop
+            await self._run_timed()
+    
+    async def _run_timed(self) -> None:
+        """
+        Run the original timing-based monitoring loop.
+        """
         while self.running:
             try:
                 # Get current interval based on time of day
@@ -518,6 +554,30 @@ class BikeMonitor:
                 logger.error(f"Error in monitoring loop: {e}")
                 # Continue running even if there's an error
                 await asyncio.sleep(10)  # Wait a bit before retrying
+    
+    async def _run_centralized(self) -> None:
+        """
+        Run in centralized mode - wait for signals to trigger checks.
+        """
+        logger.info("Running in centralized mode - waiting for signals...")
+        
+        # Set up signal handler for SIGUSR1
+        def signal_handler(signum, frame):
+            logger.info("Received SIGUSR1 - triggering check...")
+            asyncio.create_task(self.check_for_new_listings())
+        
+        signal.signal(signal.SIGUSR1, signal_handler)
+        
+        # Keep the process alive
+        while self.running:
+            try:
+                await asyncio.sleep(1)  # Sleep for 1 second at a time
+            except asyncio.CancelledError:
+                logger.info("Centralized monitoring cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in centralized monitoring: {e}")
+                await asyncio.sleep(10)
     
     def stop(self) -> None:
         """
@@ -579,39 +639,35 @@ async def main():
                        help="Logging level (default: INFO)")
     parser.add_argument("--skip-initial", action="store_true",
                        help="Skip the initial buffer building phase and go straight to ongoing monitoring")
+    parser.add_argument("--centralized", action="store_true",
+                       help="Run in centralized mode - wait for signals instead of using internal timing")
     args = parser.parse_args()
     
     # Load configuration
     try:
         config = load_config(Path(args.config))
     except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
-        print(f"Error loading configuration: {e}")
+        logger.error(f"Error loading configuration: {e}")
         sys.exit(1)
     
-    # Configure logging
-    log_level = getattr(logging, args.log_level.upper())
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(config['log_file']),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
+    # Configure logging using centralized system
+    # Command line arg can override centralized config
+    force_level = args.log_level if args.log_level != "INFO" else None
+    setup_logging(log_file=config['log_file'], force_level=force_level)
     
     # Check required environment variables
     required_env_vars = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
     if missing_vars:
-        print(f"Error: Missing required environment variables: {', '.join(missing_vars)}")
-        print("Please set these in your .env file or environment")
+        logger.error(f"Error: Missing required environment variables: {', '.join(missing_vars)}")
+        logger.error("Please set these in your .env file or environment")
         sys.exit(1)
     
     # Create monitor
     try:
-        monitor = BikeMonitor(config, skip_initial=args.skip_initial)
+        monitor = BikeMonitor(config, skip_initial=args.skip_initial, centralized=args.centralized)
     except ValueError as e:
-        print(f"Error initializing monitor: {e}")
+        logger.error(f"Error initializing monitor: {e}")
         sys.exit(1)
     
     # Set up signal handlers for graceful shutdown

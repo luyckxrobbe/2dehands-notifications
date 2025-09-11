@@ -6,11 +6,17 @@ Initialize the bike monitor buffer by scraping the first few pages.
 import asyncio
 import argparse
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Any
 
 from scrape_2dehands_live import scrape_bikes
 from current_listings import CurrentListings
+from centralized_logging import setup_logging, get_logger
+
+# Configure logging
+setup_logging()
+logger = get_logger(__name__)
 
 
 async def init_buffer(config_file: str, max_pages: int = None, max_bikes: int = None):
@@ -37,12 +43,12 @@ async def init_buffer(config_file: str, max_pages: int = None, max_bikes: int = 
     proxies = config.get('proxies', [])
     request_delay = config.get('request_delay', 1.0)
     
-    print(f"🚴‍♂️ Initializing buffer for: {url}")
-    print(f"📄 Scraping first {pages_to_scrape} pages...")
-    print(f"🔢 Target buffer size: {target_bikes} bikes")
+    logger.info(f"🚴‍♂️ Initializing buffer for: {url}")
+    logger.info(f"📄 Scraping first {pages_to_scrape} pages...")
+    logger.info(f"🔢 Target buffer size: {target_bikes} bikes")
     if proxies:
-        print(f"🌐 Using {len(proxies)} proxies")
-    print()
+        logger.info(f"🌐 Using {len(proxies)} proxies")
+    logger.info("")
     
     # Scrape multiple pages
     listings = await scrape_bikes(
@@ -53,16 +59,16 @@ async def init_buffer(config_file: str, max_pages: int = None, max_bikes: int = 
         request_delay=request_delay
     )
     
-    print(f"✅ Scraped {len(listings)} total listings")
+    logger.info(f"✅ Scraped {len(listings)} total listings")
     
     # Limit to target_bikes if we got more
     if len(listings) > target_bikes:
-        print(f"📝 Limiting to {target_bikes} most recent bikes")
+        logger.info(f"📝 Limiting to {target_bikes} most recent bikes")
         # Sort by scraped_at and take the most recent ones
         listings.bikes.sort(key=lambda b: b._scraped_at, reverse=True)
         listings.bikes = listings.bikes[:target_bikes]
     
-    print(f"🎯 Buffer initialized with {len(listings)} bikes")
+    logger.info(f"🎯 Buffer initialized with {len(listings)} bikes")
     
     # Save to backup file if specified
     if backup_file and backup_file.strip():
@@ -70,28 +76,28 @@ async def init_buffer(config_file: str, max_pages: int = None, max_bikes: int = 
         # Create directory if it doesn't exist
         backup_path.parent.mkdir(parents=True, exist_ok=True)
         listings.to_json_file(backup_path)
-        print(f"💾 Saved buffer to: {backup_path}")
+        logger.info(f"💾 Saved buffer to: {backup_path}")
     else:
-        print("⚠️  No backup file specified - buffer will not be saved")
+        logger.warning("⚠️  No backup file specified - buffer will not be saved")
     
     # Show some stats
     stats = listings.get_stats()
-    print()
-    print("📊 Buffer Statistics:")
-    print(f"   Total bikes: {stats['total_bikes']}")
-    print(f"   Bikes with price: {stats['bikes_with_price']}")
-    print(f"   Average price: €{stats['average_price']}")
-    print(f"   Price range: €{stats['min_price']} - €{stats['max_price']}")
+    logger.info("")
+    logger.info("📊 Buffer Statistics:")
+    logger.info(f"   Total bikes: {stats['total_bikes']}")
+    logger.info(f"   Bikes with price: {stats['bikes_with_price']}")
+    logger.info(f"   Average price: €{stats['average_price']}")
+    logger.info(f"   Price range: €{stats['min_price']} - €{stats['max_price']}")
     
     if stats['brands']:
-        print("   Top brands:")
+        logger.info("   Top brands:")
         for brand, count in sorted(stats['brands'].items(), key=lambda x: x[1], reverse=True)[:5]:
-            print(f"     {brand}: {count}")
+            logger.info(f"     {brand}: {count}")
     
-    print()
-    print("✅ Buffer initialization complete!")
-    print("You can now start monitoring with:")
-    print(f"python bike_monitor.py {config_file}")
+    logger.info("")
+    logger.info("✅ Buffer initialization complete!")
+    logger.info("You can now start monitoring with:")
+    logger.info(f"python bike_monitor.py {config_file}")
 
 
 def main():
@@ -105,7 +111,7 @@ def main():
     args = parser.parse_args()
     
     if not Path(args.config).exists():
-        print(f"Error: Config file not found: {args.config}")
+        logger.error(f"Error: Config file not found: {args.config}")
         return
     
     asyncio.run(init_buffer(args.config, args.pages, args.max_bikes))

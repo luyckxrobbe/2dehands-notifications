@@ -106,38 +106,38 @@ async def main():
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     
     if not bot_token:
-        print("Error: TELEGRAM_BOT_TOKEN not found in .env file")
-        print("Please create a .env file with your bot token")
-        print("Copy env_template.txt to .env and fill in your values")
+        logger.error("Error: TELEGRAM_BOT_TOKEN not found in .env file")
+        logger.error("Please create a .env file with your bot token")
+        logger.error("Copy env_template.txt to .env and fill in your values")
         return
     
     # Initialize bot
     bot = TelegramBot(bot_token)
     
     # Get bot information
-    print("Getting bot information...")
+    logger.info("Getting bot information...")
     bot_info = await bot.get_bot_info()
     if bot_info:
-        print(f"Bot: @{bot_info.get('username', 'Unknown')} ({bot_info.get('first_name', 'Unknown')})")
-        print(f"Bot ID: {bot_info.get('id', 'Unknown')}")
+        logger.info(f"Bot: @{bot_info.get('username', 'Unknown')} ({bot_info.get('first_name', 'Unknown')})")
+        logger.info(f"Bot ID: {bot_info.get('id', 'Unknown')}")
     
     # Example usage - you can modify these values
     chat_id = os.getenv('TELEGRAM_CHAT_ID', 'your_chat_id_here')
     message = "Hello! This is a test message from your Telegram bot."
     
     if chat_id == 'your_chat_id_here':
-        print("\nTo send a message, set the TELEGRAM_CHAT_ID in your .env file")
-        print("You can find your chat ID by messaging @userinfobot on Telegram")
+        logger.info("\nTo send a message, set the TELEGRAM_CHAT_ID in your .env file")
+        logger.info("You can find your chat ID by messaging @userinfobot on Telegram")
         return
     
     # Send message
-    print(f"\nSending message to chat {chat_id}...")
+    logger.info(f"\nSending message to chat {chat_id}...")
     success = await bot.send_message(chat_id, message)
     
     if success:
-        print("Message sent successfully!")
+        logger.info("Message sent successfully!")
     else:
-        print("Failed to send message")
+        logger.error("Failed to send message")
 
 
 if __name__ == "__main__":

@@ -4,10 +4,13 @@ CurrentListings class for managing collections of bike listings.
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Set, Optional
 from datetime import datetime
 from bike import Bike
+
+logger = logging.getLogger(__name__)
 
 
 class CurrentListings:
@@ -56,7 +59,7 @@ class CurrentListings:
             
             return cls(bikes, max_bikes=max_bikes)
         except (json.JSONDecodeError, KeyError, ValueError) as e:
-            print(f"Error loading from {file_path}: {e}")
+            logger.error(f"Error loading from {file_path}: {e}")
             return cls(max_bikes=max_bikes)
     
     @classmethod
