@@ -162,6 +162,7 @@ def main():
         print("  - Starts monitors immediately for configs that don't need buffer initialization")
         print("  - Runs buffer initialization in parallel (up to 4 concurrent)")
         print("  - Starts monitors as soon as their buffer initialization completes")
+        print("  - Staggered startup (2-minute delay between monitors) to spread scraping load")
         print("  - Supports folders (finds all *.json files)")
         print("  - Supports glob patterns")
         print("  - Handles graceful shutdown with Ctrl+C")
@@ -213,9 +214,14 @@ def main():
     
     # Start monitors immediately for configs that don't need buffer initialization
     if configs_ready_to_start:
-        print(f"🚀 Starting {len(configs_ready_to_start)} monitors immediately...")
+        print(f"🚀 Starting {len(configs_ready_to_start)} monitors with staggered startup...")
         
-        for config_file in configs_ready_to_start:
+        for i, config_file in enumerate(configs_ready_to_start):
+            if i > 0:  # Add delay for all monitors except the first one
+                delay_minutes = 2
+                print(f"   Waiting {delay_minutes} minutes before starting next monitor...")
+                time.sleep(delay_minutes * 60)  # Convert minutes to seconds
+            
             print(f"   Starting monitor: {config_file}")
             process = run_monitor(config_file)
             processes.append((config_file, process))
@@ -232,10 +238,17 @@ def main():
             }
             
             # Collect results and start monitors as they complete
-            for future in concurrent.futures.as_completed(future_to_config):
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_config)):
                 config_file, success = future.result()
                 if success:
                     print(f"✅ Buffer initialized for: {config_file}")
+                    
+                    # Add delay for monitors that start after buffer initialization
+                    if i > 0:  # Add delay for all monitors except the first one
+                        delay_minutes = 2
+                        print(f"   Waiting {delay_minutes} minutes before starting next monitor...")
+                        time.sleep(delay_minutes * 60)  # Convert minutes to seconds
+                    
                     print(f"🚀 Starting monitor: {config_file}")
                     process = run_monitor(config_file)
                     processes.append((config_file, process))

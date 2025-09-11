@@ -10,5 +10,5 @@
   "ongoing_pages": 5,
   "backup_file": "backups/2dehands-sportfietsen_backup.json",
   "log_file": "2dehands-sportfietsen.log",
-  "init_buffer": true
+  "init_buffer": false
 }
