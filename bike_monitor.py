@@ -416,10 +416,43 @@ class BikeMonitor:
         
         return False
     
+    def _write_status_file(self, status: str, error: str = None) -> None:
+        """
+        Write status file for centralized scheduler communication.
+        
+        Args:
+            status: Status ('running', 'completed', 'error')
+            error: Error message if status is 'error'
+        """
+        try:
+            # Create status file path based on log file name (without .log extension)
+            # This should match what the scheduler expects
+            log_name = Path(self.log_file).stem  # e.g., "2dehands-sportfietsen" from "2dehands-sportfietsen.log"
+            status_file = Path(f"status_{log_name}.json")
+            
+            status_data = {
+                'status': status,
+                'timestamp': datetime.now().isoformat(),
+                'config': self.log_file
+            }
+            
+            if error:
+                status_data['error'] = error
+            
+            with open(status_file, 'w') as f:
+                json.dump(status_data, f, indent=2)
+                
+        except Exception as e:
+            logger.warning(f"Failed to write status file: {e}")
+    
     async def check_for_new_listings(self) -> None:
         """
         Check for new listings and send notifications only for bikes posted today.
         """
+        # Write status file to indicate scraping has started
+        if self.centralized:
+            self._write_status_file('running')
+        
         try:
             # Determine how many pages to scrape
             if self.is_initial_run:
@@ -502,8 +535,15 @@ class BikeMonitor:
             logger.info(f"Rolling window now contains {len(self.previous_listings)} bikes")
             logger.info("Bike listing check completed successfully")
             
+            # Write status file to indicate scraping has completed successfully
+            if self.centralized:
+                self._write_status_file('completed')
+            
         except Exception as e:
             logger.error(f"Error during bike listing check: {e}")
+            # Write status file to indicate scraping failed
+            if self.centralized:
+                self._write_status_file('error', str(e))
     
     async def run(self) -> None:
         """

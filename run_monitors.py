@@ -128,7 +128,7 @@ class CentralizedScheduler:
     
     async def _wait_for_monitor_completion(self, process: subprocess.Popen, config_file: str):
         """
-        Wait for a monitor to complete its scraping by monitoring its output.
+        Wait for a monitor to complete its scraping using status file communication.
         
         Args:
             process: The subprocess to monitor
@@ -136,31 +136,20 @@ class CentralizedScheduler:
         """
         logger.info(f"⏳ Waiting for {config_file} to complete scraping...")
         
-        # Completion indicators that show the monitor has finished its current scrape
-        completion_indicators = [
-            "Bike listing check completed successfully",
-            "Rolling window now contains",
-            "Sent notifications for today's listings",
-            "Added processed bikes to cache"
-        ]
+        # Create status file path based on config file name
+        # Extract the monitor name from the config file path
+        config_name = Path(config_file).stem  # e.g., "config-2dehands-sportfietsen"
+        # Remove "config-" prefix to get the monitor name
+        monitor_name = config_name.replace("config-", "")  # e.g., "2dehands-sportfietsen"
+        status_file = Path(f"status_{monitor_name}.json")
         
-        # Create a queue to capture output from the process
-        output_queue = queue.Queue()
+        logger.info(f"   Looking for status file: {status_file}")
         
-        def read_output():
-            try:
-                for line in iter(process.stderr.readline, b''):
-                    if line:
-                        line_str = line.decode('utf-8').rstrip()
-                        output_queue.put(line_str)
-            except Exception:
-                pass
+        # Clear any existing status file
+        if status_file.exists():
+            status_file.unlink()
         
-        # Start reading output in a separate thread
-        reader_thread = threading.Thread(target=read_output, daemon=True)
-        reader_thread.start()
-        
-        # Wait for completion indicators
+        # Wait for the monitor to create and update the status file
         timeout_seconds = 300  # 5 minutes timeout
         start_time = time.time()
         
@@ -169,30 +158,39 @@ class CentralizedScheduler:
                 # Check if process is still running
                 if process.poll() is not None:
                     logger.warning(f"   Process {config_file} stopped unexpectedly during scraping")
-                    break
+                    return
                 
-                # Check for completion indicators in the output queue
-                try:
-                    line = output_queue.get_nowait()
-                    for indicator in completion_indicators:
-                        if indicator in line:
-                            logger.info(f"   ✅ {config_file} scraping completed")
+                # Check if status file exists and indicates completion
+                if status_file.exists():
+                    try:
+                        with open(status_file, 'r') as f:
+                            status = json.load(f)
+                        
+                        if status.get('status') == 'completed':
+                            logger.info(f"   ✅ {config_file} scraping completed (status file confirmed)")
+                            # Clean up status file
+                            status_file.unlink()
                             return
-                except queue.Empty:
-                    pass
+                        elif status.get('status') == 'error':
+                            logger.error(f"   ❌ {config_file} scraping failed: {status.get('error', 'Unknown error')}")
+                            status_file.unlink()
+                            return
+                            
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.warning(f"   Invalid status file format: {e}")
                 
                 # Wait a bit before checking again
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)  # Check every 2 seconds
                 
             except Exception as e:
                 logger.error(f"   Error monitoring {config_file}: {e}")
                 break
         
-        # If we get here, either timeout or error occurred
-        if time.time() - start_time >= timeout_seconds:
-            logger.warning(f"   ⏰ Timeout waiting for {config_file} to complete scraping")
-        else:
-            logger.info(f"   ✅ {config_file} scraping completed (or process finished)")
+        # If we get here, we've reached the timeout
+        logger.warning(f"   ⏰ Timeout waiting for {config_file} to complete scraping")
+        # Clean up status file if it exists
+        if status_file.exists():
+            status_file.unlink()
     
     async def run(self):
         """

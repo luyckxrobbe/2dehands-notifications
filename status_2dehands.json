@@ -1,0 +1,6 @@
+{
+  "status": "error",
+  "timestamp": "2025-09-11T09:55:06.775142",
+  "config": "2dehands.log",
+  "error": "Browser.close: Connection closed while reading from the driver"
+}
