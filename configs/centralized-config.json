@@ -12,7 +12,6 @@
   },
   "scheduler": {
     "max_concurrent_buffer_init": 4,
-    "startup_delay_minutes": 2,
     "description": "Scheduler behavior settings"
   },
   "monitoring": {
@@ -20,5 +19,12 @@
     "enable_telegram_shutdown": true,
     "log_level": "INFO",
     "description": "General monitoring settings"
+  },
+  "racebike_check_gpt": {
+    "model": "gpt-5-nano",
+    "max_tokens": 10,
+    "temperature": 0.1,
+    "prompt": "Is this a race bike (koersfiets) based on the title and description? Answer only 'YES' or 'NO'.",
+    "description": "GPT-based race bike classification settings"
   }
 }

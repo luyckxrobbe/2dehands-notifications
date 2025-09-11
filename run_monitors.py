@@ -44,7 +44,7 @@ class CentralizedScheduler:
         self.monitors = []  # List of (config_file, process, stdout_thread, stderr_thread)
         self.process_counter = 1
         
-        # Use centralized config for timing, fallback to calculating from monitor configs
+        # Use centralized config for timing
         if self.centralized_config.get('centralized_timing'):
             timing_config = self.centralized_config['centralized_timing']
             self.base_interval = timing_config.get('base_interval', 300)
@@ -52,40 +52,21 @@ class CentralizedScheduler:
             self.monitor_delay = timing_config.get('monitor_delay', 10)
             logger.info(f"🕐 Using centralized timing config - base interval: {self.base_interval} seconds")
         else:
-            # Fallback to calculating from monitor configs
-            self.base_interval = self._calculate_base_interval()
+            # Default values if no centralized config
+            self.base_interval = 300
             self.time_based_intervals = {}
             self.monitor_delay = 10
-            logger.info(f"🕐 Centralized scheduler using calculated base interval: {self.base_interval} seconds")
+            logger.warning(f"⚠️  No centralized timing config found, using defaults - base interval: {self.base_interval} seconds")
         
-    def _calculate_base_interval(self) -> int:
-        """
-        Calculate the most frequent (shortest) interval across all configs.
-        This will be our base interval for the centralized scheduler.
-        """
-        min_interval = float('inf')
-        
-        for config in self.configs:
-            # Check time-based intervals
-            time_intervals = config.get('time_based_intervals', {})
-            if time_intervals:
-                for interval in time_intervals.values():
-                    min_interval = min(min_interval, interval)
-            
-            # Check default interval
-            default_interval = config.get('check_interval', 300)
-            min_interval = min(min_interval, default_interval)
-        
-        return int(min_interval) if min_interval != float('inf') else 300
     
     def _get_current_interval(self) -> int:
         """
         Get the current interval based on the time of day.
-        Uses centralized timing config if available, otherwise falls back to monitor configs.
+        Uses only centralized timing config.
         """
         current_time = datetime.now().time()
         
-        # Use centralized time-based intervals if available
+        # Use centralized time-based intervals
         if self.time_based_intervals:
             for time_range, interval in self.time_based_intervals.items():
                 start_str, end_str = time_range.split('-')
@@ -99,23 +80,6 @@ class CentralizedScheduler:
                 else:
                     if current_time >= start_time or current_time <= end_time:
                         return interval
-        
-        # Fallback: Check all time-based intervals from all configs
-        for config in self.configs:
-            time_intervals = config.get('time_based_intervals', {})
-            if time_intervals:
-                for time_range, interval in time_intervals.items():
-                    start_str, end_str = time_range.split('-')
-                    start_time = dt_time.fromisoformat(start_str)
-                    end_time = dt_time.fromisoformat(end_str)
-                    
-                    # Handle the case where the range crosses midnight
-                    if start_time <= end_time:
-                        if start_time <= current_time <= end_time:
-                            return interval
-                    else:
-                        if current_time >= start_time or current_time <= end_time:
-                            return interval
         
         # Fallback to base interval
         return self.base_interval
@@ -136,7 +100,7 @@ class CentralizedScheduler:
     
     async def trigger_check(self):
         """
-        Trigger a check for all monitors sequentially.
+        Trigger a check for all monitors sequentially, waiting for each to complete before starting the next.
         """
         if not self.monitors:
             return
@@ -150,16 +114,85 @@ class CentralizedScheduler:
             
             logger.info(f"🚀 [{i+1}/{len(self.monitors)}] Triggering check for: {config_file}")
             
-            # Send SIGUSR1 signal to trigger a check (we'll need to modify bike_monitor.py to handle this)
+            # Send SIGUSR1 signal to trigger a check
             try:
                 process.send_signal(subprocess.signal.SIGUSR1)
             except Exception as e:
                 logger.error(f"❌ Error triggering check for {config_file}: {e}")
+                continue
             
-            # Wait a bit between monitors to spread the load
-            await asyncio.sleep(self.monitor_delay)
+            # Wait for this monitor to complete its scraping before moving to the next
+            await self._wait_for_monitor_completion(process, config_file)
         
         logger.info("✅ Sequential check cycle completed")
+    
+    async def _wait_for_monitor_completion(self, process: subprocess.Popen, config_file: str):
+        """
+        Wait for a monitor to complete its scraping by monitoring its output.
+        
+        Args:
+            process: The subprocess to monitor
+            config_file: Config file name for identification
+        """
+        logger.info(f"⏳ Waiting for {config_file} to complete scraping...")
+        
+        # Completion indicators that show the monitor has finished its current scrape
+        completion_indicators = [
+            "Bike listing check completed successfully",
+            "Rolling window now contains",
+            "Sent notifications for today's listings",
+            "Added processed bikes to cache"
+        ]
+        
+        # Create a queue to capture output from the process
+        output_queue = queue.Queue()
+        
+        def read_output():
+            try:
+                for line in iter(process.stderr.readline, b''):
+                    if line:
+                        line_str = line.decode('utf-8').rstrip()
+                        output_queue.put(line_str)
+            except Exception:
+                pass
+        
+        # Start reading output in a separate thread
+        reader_thread = threading.Thread(target=read_output, daemon=True)
+        reader_thread.start()
+        
+        # Wait for completion indicators
+        timeout_seconds = 300  # 5 minutes timeout
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout_seconds:
+            try:
+                # Check if process is still running
+                if process.poll() is not None:
+                    logger.warning(f"   Process {config_file} stopped unexpectedly during scraping")
+                    break
+                
+                # Check for completion indicators in the output queue
+                try:
+                    line = output_queue.get_nowait()
+                    for indicator in completion_indicators:
+                        if indicator in line:
+                            logger.info(f"   ✅ {config_file} scraping completed")
+                            return
+                except queue.Empty:
+                    pass
+                
+                # Wait a bit before checking again
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                logger.error(f"   Error monitoring {config_file}: {e}")
+                break
+        
+        # If we get here, either timeout or error occurred
+        if time.time() - start_time >= timeout_seconds:
+            logger.warning(f"   ⏰ Timeout waiting for {config_file} to complete scraping")
+        else:
+            logger.info(f"   ✅ {config_file} scraping completed (or process finished)")
     
     async def run(self):
         """
@@ -167,6 +200,12 @@ class CentralizedScheduler:
         """
         self.running = True
         logger.info("🕐 Starting centralized scheduler...")
+        
+        # Start with an immediate check cycle after a short delay to ensure all monitors are initialized
+        logger.info("🚀 Starting with immediate scrape cycle...")
+        logger.info("⏳ Waiting 5 seconds for all monitors to initialize...")
+        await asyncio.sleep(5)
+        await self.trigger_check()
         
         while self.running:
             try:
@@ -280,75 +319,6 @@ def run_init_buffer(config_file: str) -> Tuple[str, bool]:
         return (config_file, False)
 
 
-async def wait_for_initial_check_completion(process: subprocess.Popen, config_file: str):
-    """
-    Wait for a monitor to complete its initial check by monitoring its output.
-    
-    Args:
-        process: The subprocess to monitor
-        config_file: Config file name for identification
-    """
-    logger.info(f"   Monitoring {config_file} for initial check completion...")
-    
-    # Wait for the process to output the completion message
-    # We'll look for messages that indicate the initial check is done
-    completion_indicators = [
-        "Initial buffer building complete",
-        "Bike listing check completed successfully",
-        "Rolling window now contains",
-        "Starting ongoing bike listing check"
-    ]
-    
-    # Create a temporary output reader to monitor for completion
-    
-    output_queue = queue.Queue()
-    
-    def read_output():
-        try:
-            for line in iter(process.stderr.readline, b''):
-                if line:
-                    line_str = line.decode('utf-8').rstrip()
-                    output_queue.put(line_str)
-        except Exception:
-            pass
-    
-    # Start reading output in a separate thread
-    reader_thread = threading.Thread(target=read_output, daemon=True)
-    reader_thread.start()
-    
-    # Wait for completion indicators
-    timeout_seconds = 300  # 5 minutes timeout
-    start_time = time.time()
-    
-    while time.time() - start_time < timeout_seconds:
-        try:
-            # Check if process is still running
-            if process.poll() is not None:
-                logger.warning(f"   Process {config_file} stopped unexpectedly during initial check")
-                break
-            
-            # Check for completion indicators in the output queue
-            try:
-                line = output_queue.get_nowait()
-                for indicator in completion_indicators:
-                    if indicator in line:
-                        logger.info(f"   ✅ {config_file} initial check completed")
-                        return
-            except queue.Empty:
-                pass
-            
-            # Wait a bit before checking again
-            await asyncio.sleep(1)
-            
-        except Exception as e:
-            logger.error(f"   Error monitoring {config_file}: {e}")
-            break
-    
-    # If we get here, either timeout or error occurred
-    if time.time() - start_time >= timeout_seconds:
-        logger.warning(f"   ⏰ Timeout waiting for {config_file} initial check completion")
-    else:
-        logger.info(f"   ✅ {config_file} initial check completed (or process finished)")
 
 
 def stream_output(process: subprocess.Popen, prefix: str, config_file: str):
@@ -530,13 +500,12 @@ async def main():
         logger.info("")
         logger.info("Features:")
         logger.info("  - Centralized timing scheduler prevents simultaneous scraping")
-        logger.info("  - Monitors run sequentially when triggered")
+        logger.info("  - Monitors run sequentially when triggered (scrape1 → scrape2 → scrape3 → WAIT → repeat)")
         logger.info("  - Uses centralized-config.json for timing and scheduler settings")
         logger.info("  - Automatically initializes buffer if 'init_buffer': true in config")
-        logger.info("  - Starts monitors immediately for configs that don't need buffer initialization")
+        logger.info("  - Starts all monitors immediately (no startup delays in centralized mode)")
         logger.info("  - Runs buffer initialization in parallel (configurable concurrency)")
         logger.info("  - Starts monitors as soon as their buffer initialization completes")
-        logger.info("  - Staggered startup (configurable delay between monitors)")
         logger.info("  - Supports folders (finds all *.json files)")
         logger.info("  - Supports glob patterns")
         logger.info("  - Handles graceful shutdown with Ctrl+C")
@@ -608,28 +577,14 @@ async def main():
     
     # Start monitors immediately for configs that don't need buffer initialization
     if configs_ready_to_start:
-        logger.info(f"🚀 Starting {len(configs_ready_to_start)} monitors with staggered startup...")
-        
-        # Get startup delay from centralized config
-        startup_delay_minutes = 2  # default
-        if centralized_config.get('scheduler', {}).get('startup_delay_minutes'):
-            startup_delay_minutes = centralized_config['scheduler']['startup_delay_minutes']
+        logger.info(f"🚀 Starting {len(configs_ready_to_start)} monitors immediately (centralized mode)...")
         
         for i, config_file in enumerate(configs_ready_to_start):
-            if i > 0:  # Add delay for all monitors except the first one
-                logger.info(f"   Waiting {startup_delay_minutes} minutes before starting next monitor...")
-                time.sleep(startup_delay_minutes * 60)  # Convert minutes to seconds
-            
             logger.info(f"   Starting monitor: {config_file}")
             process, stdout_thread, stderr_thread = run_monitor(config_file, process_counter)
             processes.append((config_file, process, stdout_thread, stderr_thread))
             scheduler.add_monitor(config_file, process, stdout_thread, stderr_thread)
             process_counter += 1
-            
-            # For the first monitor, wait for it to complete its initial check before starting the next one
-            if i == 0 and len(configs_ready_to_start) > 1:
-                logger.info("   Waiting for first monitor to complete initial check...")
-                await wait_for_initial_check_completion(process, config_file)
     
     # Run buffer initialization in parallel for configs that need it
     if configs_needing_init:
@@ -652,12 +607,6 @@ async def main():
                 config_file, success = future.result()
                 if success:
                     logger.info(f"✅ Buffer initialized for: {config_file}")
-                    
-                    # Add delay for monitors that start after buffer initialization
-                    if i > 0:  # Add delay for all monitors except the first one
-                        logger.info(f"   Waiting {startup_delay_minutes} minutes before starting next monitor...")
-                        time.sleep(startup_delay_minutes * 60)  # Convert minutes to seconds
-                    
                     logger.info(f"🚀 Starting monitor: {config_file}")
                     process, stdout_thread, stderr_thread = run_monitor(config_file, process_counter)
                     processes.append((config_file, process, stdout_thread, stderr_thread))

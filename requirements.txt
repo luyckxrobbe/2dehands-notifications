@@ -3,3 +3,4 @@ lxml>=4.9.3
 playwright>=1.47.0
 python-telegram-bot>=20.0
 python-dotenv>=1.0.0
+openai>=1.0.0

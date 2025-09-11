@@ -22,6 +22,7 @@ from bike import Bike
 from telegram_bot import TelegramBot
 from listing_scraper import ListingScraper
 from centralized_logging import setup_logging, get_logger
+from gpt_racebike_classifier import create_classifier_from_centralized_config
 
 # Load environment variables
 load_dotenv()
@@ -46,8 +47,13 @@ class BikeMonitor:
             centralized: If True, run in centralized mode (wait for signals)
         """
         self.url = config['url']
-        self.check_interval = config['check_interval']
-        self.time_based_intervals = config.get('time_based_intervals', {})
+        # In centralized mode, check_interval is not needed as timing is handled centrally
+        if centralized:
+            self.check_interval = 300  # Default value, not used in centralized mode
+            self.time_based_intervals = {}  # Not used in centralized mode
+        else:
+            self.check_interval = config['check_interval']
+            self.time_based_intervals = config.get('time_based_intervals', {})
         self.max_bikes = config['max_bikes']
         self.initial_pages = config['initial_pages']
         self.ongoing_pages = config['ongoing_pages']
@@ -64,6 +70,15 @@ class BikeMonitor:
         # Proxy configuration (optional)
         self.proxies = config.get('proxies', [])
         self.request_delay = config.get('request_delay', 1.0)
+        
+        # Race bike classifier - only enable if specified in config
+        self.race_bike_classifier = None
+        enable_gpt_check = config.get('enable_gpt_racebike_check', False)
+        if enable_gpt_check:
+            self.race_bike_classifier = create_classifier_from_centralized_config()
+            logger.info("GPT race bike classifier enabled (configured in config file)")
+        else:
+            logger.info("GPT race bike classifier disabled (not enabled in config file)")
         
         self.running = False
         self.centralized = centralized
@@ -345,7 +360,18 @@ class BikeMonitor:
                                 logger.info(f"Bike is from business seller - skipping notification: {bike.title}")
                                 return False
                             
-                            logger.info(f"Bike is from today - sending notification: {bike.title}")
+                            # Check if it's actually a race bike using GPT (only for sportfietsen configs)
+                            if self.race_bike_classifier:
+                                is_race_bike = self.race_bike_classifier.classify_bike({
+                                    'title': bike.title,
+                                    'description': detailed_info.get('description', '')
+                                })
+                                
+                                if not is_race_bike:
+                                    logger.info(f"Bike is not a race bike according to GPT - skipping notification: {bike.title}")
+                                    return False
+                            
+                            logger.info(f"Bike is from today and is a race bike - sending notification: {bike.title}")
                             
                             # Format message with detailed info
                             message = self.format_bike_message(bike, detailed_info)
@@ -511,20 +537,19 @@ class BikeMonitor:
         startup_message += f"Features: Detailed specs, seller info, view counts\n"
         startup_message += f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
-        await self.telegram_bot.send_message(
-            chat_id=self.chat_id,
-            message=startup_message,
-            parse_mode='HTML'
-        )
-        
-        # Initial check
-        await self.check_for_new_listings()
+        # await self.telegram_bot.send_message(
+        #     chat_id=self.chat_id,
+        #     message=startup_message,
+        #     parse_mode='HTML'
+        # )
         
         if self.centralized:
-            # In centralized mode, wait for signals
+            # In centralized mode, skip initial check and wait for signals
+            logger.info("Running in centralized mode - waiting for signals...")
             await self._run_centralized()
         else:
-            # Original timing-based loop
+            # Original timing-based loop with initial check
+            await self.check_for_new_listings()
             await self._run_timed()
     
     async def _run_timed(self) -> None:
@@ -594,12 +619,13 @@ class BikeMonitor:
                 logger.warning(f"Error cleaning up listing scraper: {e}")
 
 
-def load_config(config_file: Path) -> Dict[str, Any]:
+def load_config(config_file: Path, centralized: bool = False) -> Dict[str, Any]:
     """
     Load configuration from JSON file.
     
     Args:
         config_file: Path to the JSON configuration file
+        centralized: If True, check_interval is optional (timing handled centrally)
         
     Returns:
         Configuration dictionary
@@ -619,7 +645,11 @@ def load_config(config_file: Path) -> Dict[str, Any]:
         raise json.JSONDecodeError(f"Invalid JSON in config file {config_file}: {e}")
     
     # Validate required fields
-    required_fields = ['url', 'check_interval', 'max_bikes', 'initial_pages', 'ongoing_pages', 'backup_file', 'log_file']
+    required_fields = ['url', 'max_bikes', 'initial_pages', 'ongoing_pages', 'backup_file', 'log_file']
+    # In centralized mode, check_interval is not required
+    if not centralized:
+        required_fields.append('check_interval')
+    
     missing_fields = [field for field in required_fields if field not in config]
     if missing_fields:
         raise KeyError(f"Missing required configuration fields: {missing_fields}")
@@ -645,7 +675,7 @@ async def main():
     
     # Load configuration
     try:
-        config = load_config(Path(args.config))
+        config = load_config(Path(args.config), centralized=args.centralized)
     except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
         logger.error(f"Error loading configuration: {e}")
         sys.exit(1)
