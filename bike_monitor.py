@@ -388,14 +388,6 @@ class BikeMonitor:
                     else:
                         logger.info(f"Bike is not from today - skipping notification: {bike.title}")
                         return False
-                else:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Could not determine date for bike: {bike.title} - retrying in 2 seconds...")
-                        await asyncio.sleep(2)  # Wait 2 seconds before retry
-                        continue
-                    else:
-                        logger.warning(f"Could not determine date for bike after {max_retries} attempts: {bike.title}")
-                        return False
                     
                 except Exception as e:
                     if attempt < max_retries - 1:
