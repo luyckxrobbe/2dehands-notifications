@@ -23,6 +23,7 @@ from bike import Bike
 from bike_minimal import BikeMinimal, BikeMinimalListings
 from telegram_bot import TelegramBot
 from listing_scraper import ListingScraper
+from listing_scraper_pi import ListingScraperPi
 from centralized_logging import setup_logging, get_logger
 from gpt_racebike_classifier import create_classifier_from_centralized_config
 
@@ -224,11 +225,19 @@ class BikeMonitor:
         # Check if it's from today if we have detailed info
         is_today = False
         if detailed_info and detailed_info.get('date_posted'):
-            scraper = ListingScraper(
-                headless=True,
-                proxies=self.proxies if self.proxies else None,
-                request_delay=self.request_delay
-            )
+            # Use Pi-optimized scraper if in Pi mode
+            if self.pi_optimized:
+                scraper = ListingScraperPi(
+                    headless=True,
+                    proxies=self.proxies if self.proxies else None,
+                    request_delay=self.request_delay
+                )
+            else:
+                scraper = ListingScraper(
+                    headless=True,
+                    proxies=self.proxies if self.proxies else None,
+                    request_delay=self.request_delay
+                )
             is_today = scraper.is_today(detailed_info['date_posted'])
         
         # Create message with today indicator
@@ -329,11 +338,19 @@ class BikeMonitor:
                 # Try to get detailed information from the listing page
                 try:
                     if not self.listing_scraper:
-                        self.listing_scraper = ListingScraper(
-                            headless=True,
-                            proxies=self.proxies if self.proxies else None,
-                            request_delay=self.request_delay
-                        )
+                        # Use Pi-optimized scraper if in Pi mode
+                        if self.pi_optimized:
+                            self.listing_scraper = ListingScraperPi(
+                                headless=True,
+                                proxies=self.proxies if self.proxies else None,
+                                request_delay=self.request_delay
+                            )
+                        else:
+                            self.listing_scraper = ListingScraper(
+                                headless=True,
+                                proxies=self.proxies if self.proxies else None,
+                                request_delay=self.request_delay
+                            )
                         await self.listing_scraper.__aenter__()
                     
                     if attempt == 0:
