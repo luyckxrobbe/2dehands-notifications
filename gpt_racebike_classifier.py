@@ -7,7 +7,11 @@ import os
 import logging
 from typing import Optional, Dict, Any
 from openai import OpenAI
+from dotenv import load_dotenv
 from centralized_logging import get_logger
+
+# Load environment variables from .env file
+load_dotenv()
 
 logger = get_logger(__name__)
 

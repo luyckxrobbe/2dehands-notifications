@@ -20,7 +20,7 @@
     "description": "Pi monitoring settings"
   },
   "racebike_check_gpt": {
-    "model": "gpt-5-nano",
+    "model": "gpt-4o-mini",
     "max_completion_tokens": 10,
     "temperature": 0.1,
     "prompt": "Is this a race bike (koersfiets) based on the title and description? Answer only 'YES' or 'NO'.",
