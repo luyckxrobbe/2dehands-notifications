@@ -1,0 +1,38 @@
+{
+  "centralized_timing": {
+    "base_interval": 600,
+    "time_based_intervals": {
+      "01:00-07:00": 1800,
+      "07:00-16:00": 900,
+      "16:00-22:00": 600,
+      "22:00-01:00": 900
+    },
+    "monitor_delay": 15,
+    "description": "Raspberry Pi optimized timing - longer intervals to reduce load"
+  },
+  "scheduler": {
+    "max_concurrent_buffer_init": 1,
+    "description": "Pi scheduler - single threaded buffer init"
+  },
+  "monitoring": {
+    "enable_telegram_startup": true,
+    "enable_telegram_shutdown": true,
+    "log_level": "INFO",
+    "description": "Pi monitoring settings"
+  },
+  "racebike_check_gpt": {
+    "model": "gpt-5-nano",
+    "max_completion_tokens": 10,
+    "temperature": 0.1,
+    "prompt": "Is this a race bike (koersfiets) based on the title and description? Answer only 'YES' or 'NO'.",
+    "description": "GPT-based race bike classification settings"
+  },
+  "pi_optimizations": {
+    "use_pi_scraper": true,
+    "max_pages_per_monitor": 10,
+    "request_delay": 2.0,
+    "page_timeout": 15000,
+    "max_pages_per_session": 5,
+    "description": "Raspberry Pi specific optimizations"
+  }
+}

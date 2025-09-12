@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
-Script to run multiple bike monitors simultaneously with optional buffer initialization.
+Script to run multiple bike monitors sequentially with optional buffer initialization.
 """
 
 import asyncio
-import subprocess
 import sys
 import json
 import time
 import glob
-import concurrent.futures
-import threading
 import logging
-import queue
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 from datetime import datetime, time as dt_time
 
 from centralized_logging import setup_logging, get_logger
+from bike_monitor import BikeMonitor
 
 # Configure logging
 setup_logging()
@@ -30,19 +27,17 @@ class CentralizedScheduler:
     and runs them sequentially to avoid simultaneous scraping.
     """
     
-    def __init__(self, configs: List[Dict[str, Any]], centralized_config: Dict[str, Any] = None):
+    def __init__(self, monitors: List[BikeMonitor], centralized_config: Dict[str, Any] = None):
         """
         Initialize the centralized scheduler.
         
         Args:
-            configs: List of configuration dictionaries for all monitors
+            monitors: List of BikeMonitor instances
             centralized_config: Centralized configuration dictionary
         """
-        self.configs = configs
+        self.monitors = monitors
         self.centralized_config = centralized_config or {}
         self.running = False
-        self.monitors = []  # List of (config_file, process, stdout_thread, stderr_thread)
-        self.process_counter = 1
         
         # Use centralized config for timing
         if self.centralized_config.get('centralized_timing'):
@@ -84,20 +79,6 @@ class CentralizedScheduler:
         # Fallback to base interval
         return self.base_interval
     
-    def add_monitor(self, config_file: str, process: subprocess.Popen, 
-                   stdout_thread: threading.Thread, stderr_thread: threading.Thread):
-        """
-        Add a monitor to the scheduler.
-        
-        Args:
-            config_file: Path to the config file
-            process: The subprocess for the monitor
-            stdout_thread: Thread handling stdout
-            stderr_thread: Thread handling stderr
-        """
-        self.monitors.append((config_file, process, stdout_thread, stderr_thread))
-        logger.info(f"📋 Added monitor to scheduler: {config_file}")
-    
     async def trigger_check(self):
         """
         Trigger a check for all monitors sequentially, waiting for each to complete before starting the next.
@@ -107,90 +88,19 @@ class CentralizedScheduler:
         
         logger.info(f"🔄 Triggering sequential check for {len(self.monitors)} monitors...")
         
-        for i, (config_file, process, stdout_thread, stderr_thread) in enumerate(self.monitors):
-            if process.poll() is not None:
-                logger.warning(f"⚠️  Monitor {config_file} is not running, skipping...")
-                continue
+        for i, monitor in enumerate(self.monitors):
+            logger.info(f"🚀 [{i+1}/{len(self.monitors)}] Running check for: {monitor.log_file}")
             
-            logger.info(f"🚀 [{i+1}/{len(self.monitors)}] Triggering check for: {config_file}")
-            
-            # Send SIGUSR1 signal to trigger a check
             try:
-                process.send_signal(subprocess.signal.SIGUSR1)
+                # Run the check directly on the monitor instance
+                await monitor.check_for_new_listings()
+                logger.info(f"✅ Completed check for: {monitor.log_file}")
             except Exception as e:
-                logger.error(f"❌ Error triggering check for {config_file}: {e}")
+                logger.error(f"❌ Error running check for {monitor.log_file}: {e}")
                 continue
-            
-            # Wait for this monitor to complete its scraping before moving to the next
-            await self._wait_for_monitor_completion(process, config_file)
         
         logger.info("✅ Sequential check cycle completed")
     
-    async def _wait_for_monitor_completion(self, process: subprocess.Popen, config_file: str):
-        """
-        Wait for a monitor to complete its scraping using status file communication.
-        
-        Args:
-            process: The subprocess to monitor
-            config_file: Config file name for identification
-        """
-        logger.info(f"⏳ Waiting for {config_file} to complete scraping...")
-        
-        # Create status file path based on config file name
-        # Extract the monitor name from the config file path
-        config_name = Path(config_file).stem  # e.g., "config-2dehands-sportfietsen"
-        # Remove "config-" prefix to get the monitor name
-        monitor_name = config_name.replace("config-", "")  # e.g., "2dehands-sportfietsen"
-        status_file = Path(f"status_{monitor_name}.json")
-        
-        logger.info(f"   Looking for status file: {status_file}")
-        
-        # Clear any existing status file
-        if status_file.exists():
-            status_file.unlink()
-        
-        # Wait for the monitor to create and update the status file
-        timeout_seconds = 300  # 5 minutes timeout
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout_seconds:
-            try:
-                # Check if process is still running
-                if process.poll() is not None:
-                    logger.warning(f"   Process {config_file} stopped unexpectedly during scraping")
-                    return
-                
-                # Check if status file exists and indicates completion
-                if status_file.exists():
-                    try:
-                        with open(status_file, 'r') as f:
-                            status = json.load(f)
-                        
-                        if status.get('status') == 'completed':
-                            logger.info(f"   ✅ {config_file} scraping completed (status file confirmed)")
-                            # Clean up status file
-                            status_file.unlink()
-                            return
-                        elif status.get('status') == 'error':
-                            logger.error(f"   ❌ {config_file} scraping failed: {status.get('error', 'Unknown error')}")
-                            status_file.unlink()
-                            return
-                            
-                    except (json.JSONDecodeError, KeyError) as e:
-                        logger.warning(f"   Invalid status file format: {e}")
-                
-                # Wait a bit before checking again
-                await asyncio.sleep(2)  # Check every 2 seconds
-                
-            except Exception as e:
-                logger.error(f"   Error monitoring {config_file}: {e}")
-                break
-        
-        # If we get here, we've reached the timeout
-        logger.warning(f"   ⏰ Timeout waiting for {config_file} to complete scraping")
-        # Clean up status file if it exists
-        if status_file.exists():
-            status_file.unlink()
     
     async def run(self):
         """
@@ -280,7 +190,7 @@ def load_centralized_config(config_file: str = "configs/centralized-config.json"
         return {}
 
 
-def run_init_buffer(config_file: str) -> Tuple[str, bool]:
+async def run_init_buffer(config_file: str) -> tuple[str, bool]:
     """
     Run buffer initialization for a config file.
     
@@ -293,32 +203,14 @@ def run_init_buffer(config_file: str) -> Tuple[str, bool]:
     logger.info(f"🔄 Initializing buffer for: {config_file}")
     
     try:
-        # Use the virtual environment Python if available
-        venv_python = Path(".venv/bin/python")
-        if venv_python.exists():
-            python_executable = str(venv_python)
-        else:
-            python_executable = sys.executable
+        # Import and call init_buffer function directly
+        from init_buffer import init_buffer
         
-        # Run init_buffer.py with the config file
-        result = subprocess.run(
-            [python_executable, "init_buffer.py", config_file],
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minute timeout
-        )
-        
-        if result.returncode == 0:
-            logger.info(f"✅ Buffer initialization successful for: {config_file}")
-            return (config_file, True)
-        else:
-            logger.error(f"❌ Buffer initialization failed for: {config_file}")
-            logger.error(f"Error: {result.stderr}")
-            return (config_file, False)
+        # Call the init_buffer function directly
+        await init_buffer(config_file)
+        logger.info(f"✅ Buffer initialization successful for: {config_file}")
+        return (config_file, True)
             
-    except subprocess.TimeoutExpired:
-        logger.error(f"⏰ Buffer initialization timed out for: {config_file}")
-        return (config_file, False)
     except Exception as e:
         logger.error(f"❌ Error running buffer initialization for: {config_file}: {e}")
         return (config_file, False)
@@ -326,111 +218,27 @@ def run_init_buffer(config_file: str) -> Tuple[str, bool]:
 
 
 
-def stream_output(process: subprocess.Popen, prefix: str, config_file: str):
+def create_monitor(config_file: str) -> BikeMonitor:
     """
-    Stream output from a subprocess with a prefix.
-    
-    Args:
-        process: The subprocess to stream output from
-        prefix: Prefix to add to each line (e.g., "[1]")
-        config_file: Config file name for identification
-    """
-    def read_stdout():
-        try:
-            for line in iter(process.stdout.readline, b''):
-                if line:
-                    line_str = line.decode('utf-8').rstrip()
-                    # Extract just the message part, removing the log header
-                    clean_message = extract_log_message(line_str)
-                    logger.info(f"{prefix} {clean_message}")
-        except Exception as e:
-            logger.error(f"{prefix} Error reading stdout: {e}")
-    
-    def read_stderr():
-        try:
-            for line in iter(process.stderr.readline, b''):
-                if line:
-                    line_str = line.decode('utf-8').rstrip()
-                    # Extract just the message part, removing the log header
-                    clean_message = extract_log_message(line_str)
-                    
-                    # Parse the log level from the original line and use appropriate logger level
-                    if ' - ERROR - ' in line_str:
-                        logger.error(f"{prefix} {clean_message}")
-                    elif ' - WARNING - ' in line_str:
-                        logger.warning(f"{prefix} {clean_message}")
-                    elif ' - DEBUG - ' in line_str:
-                        logger.debug(f"{prefix} {clean_message}")
-                    else:
-                        # Default to info for INFO level and other messages
-                        logger.info(f"{prefix} {clean_message}")
-        except Exception as e:
-            logger.error(f"{prefix} Error reading stderr: {e}")
-    
-    def extract_log_message(line_str):
-        """
-        Extract the actual message from a log line, removing the timestamp and log level header.
-        Expected format: "2025-09-11 08:33:49,785 - __main__ - INFO - actual message here"
-        """
-        # Look for the pattern: timestamp - logger_name - level - message
-        parts = line_str.split(' - ', 3)
-        if len(parts) >= 4:
-            # Return just the message part (everything after the third ' - ')
-            return parts[3]
-        else:
-            # If it doesn't match the expected format, return the whole line
-            return line_str
-    
-    # Start threads for stdout and stderr
-    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
-    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
-    
-    stdout_thread.start()
-    stderr_thread.start()
-    
-    return stdout_thread, stderr_thread
-
-
-def run_monitor(config_file: str, process_id: int) -> Tuple[subprocess.Popen, threading.Thread, threading.Thread]:
-    """
-    Start a monitor process for the given config file with output streaming.
-    The monitor will run in centralized mode (no internal timing loop).
+    Create a BikeMonitor instance for the given config file.
     
     Args:
         config_file: Path to the JSON configuration file
-        process_id: Unique ID for this process (used in prefix)
         
     Returns:
-        Tuple of (process, stdout_thread, stderr_thread)
+        BikeMonitor instance
     """
-    # Load config to check if we should skip initial check
+    # Load config
     config = load_config(config_file)
-    skip_initial = config.get('initial_check', True) == False  # Default to True (don't skip) if not specified
     
-    # Use the virtual environment Python if available
-    venv_python = Path(".venv/bin/python")
-    if venv_python.exists():
-        python_executable = str(venv_python)
-    else:
-        python_executable = sys.executable
+    # Add default check_interval if missing (for centralized mode)
+    if 'check_interval' not in config:
+        config['check_interval'] = 300  # Default 5 minutes, not used in centralized mode
     
-    cmd = [python_executable, "bike_monitor.py", config_file]
-    if skip_initial:
-        cmd.append("--skip-initial")
+    # Create monitor instance in centralized mode since we handle timing ourselves
+    monitor = BikeMonitor(config, skip_initial=True, centralized=True)
     
-    # Add centralized mode flag
-    cmd.append("--centralized")
-    
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    
-    # Create prefix based on process ID and config file name
-    config_name = Path(config_file).stem
-    prefix = f"[{process_id}] {config_name}"
-    
-    # Start output streaming threads
-    stdout_thread, stderr_thread = stream_output(process, prefix, config_file)
-    
-    return process, stdout_thread, stderr_thread
+    return monitor
 
 
 def find_config_files(paths: List[str]) -> List[str]:
@@ -515,13 +323,10 @@ async def main():
         logger.info("  - Monitors run sequentially when triggered (scrape1 → scrape2 → scrape3 → WAIT → repeat)")
         logger.info("  - Uses centralized-config.json for timing and scheduler settings")
         logger.info("  - Automatically initializes buffer if 'init_buffer': true in config")
-        logger.info("  - Starts all monitors immediately (no startup delays in centralized mode)")
-        logger.info("  - Runs buffer initialization in parallel (configurable concurrency)")
-        logger.info("  - Starts monitors as soon as their buffer initialization completes")
+        logger.info("  - Runs buffer initialization sequentially")
         logger.info("  - Supports folders (finds all *.json files)")
         logger.info("  - Supports glob patterns")
         logger.info("  - Handles graceful shutdown with Ctrl+C")
-        logger.info("  - Real-time output streaming with process prefixes")
         sys.exit(1)
     
     # Find all config files from the provided paths
@@ -537,24 +342,6 @@ async def main():
     
     # Load centralized config
     centralized_config = load_centralized_config()
-    
-    # Load all configs for the centralized scheduler
-    all_configs = []
-    for config_file in config_files:
-        if Path(config_file).exists():
-            config = load_config(config_file)
-            if config:
-                all_configs.append(config)
-    
-    if not all_configs:
-        logger.error("❌ No valid configs found")
-        sys.exit(1)
-    
-    # Create centralized scheduler with centralized config
-    scheduler = CentralizedScheduler(all_configs, centralized_config)
-    
-    processes = []
-    process_counter = 1
     
     logger.info("🚴‍♂️ Starting multiple bike monitors with centralized timing...")
     logger.info("")
@@ -587,54 +374,42 @@ async def main():
         else:
             configs_ready_to_start.append(config_file)
     
-    # Start monitors immediately for configs that don't need buffer initialization
-    if configs_ready_to_start:
-        logger.info(f"🚀 Starting {len(configs_ready_to_start)} monitors immediately (centralized mode)...")
-        
-        for i, config_file in enumerate(configs_ready_to_start):
-            logger.info(f"   Starting monitor: {config_file}")
-            process, stdout_thread, stderr_thread = run_monitor(config_file, process_counter)
-            processes.append((config_file, process, stdout_thread, stderr_thread))
-            scheduler.add_monitor(config_file, process, stdout_thread, stderr_thread)
-            process_counter += 1
-    
-    # Run buffer initialization in parallel for configs that need it
+    # Run buffer initialization sequentially for configs that need it
     if configs_needing_init:
-        logger.info(f"🔄 Running buffer initialization for {len(configs_needing_init)} configs in parallel...")
+        logger.info(f"🔄 Running buffer initialization for {len(configs_needing_init)} configs sequentially...")
         
-        # Get max concurrent workers from centralized config
-        max_workers = 4  # default
-        if centralized_config.get('scheduler', {}).get('max_concurrent_buffer_init'):
-            max_workers = centralized_config['scheduler']['max_concurrent_buffer_init']
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(configs_needing_init), max_workers)) as executor:
-            # Submit all buffer initialization tasks
-            future_to_config = {
-                executor.submit(run_init_buffer, config_file): config_file 
-                for config_file in configs_needing_init
-            }
-            
-            # Collect results and start monitors as they complete
-            for i, future in enumerate(concurrent.futures.as_completed(future_to_config)):
-                config_file, success = future.result()
-                if success:
-                    logger.info(f"✅ Buffer initialized for: {config_file}")
-                    logger.info(f"🚀 Starting monitor: {config_file}")
-                    process, stdout_thread, stderr_thread = run_monitor(config_file, process_counter)
-                    processes.append((config_file, process, stdout_thread, stderr_thread))
-                    scheduler.add_monitor(config_file, process, stdout_thread, stderr_thread)
-                    process_counter += 1
-                else:
-                    logger.error(f"❌ Failed to initialize buffer for: {config_file}")
-                    logger.info(f"   Skipping monitor startup for: {config_file}")
+        for config_file in configs_needing_init:
+            config_file, success = await run_init_buffer(config_file)
+            if success:
+                logger.info(f"✅ Buffer initialized for: {config_file}")
+                configs_ready_to_start.append(config_file)
+            else:
+                logger.error(f"❌ Failed to initialize buffer for: {config_file}")
+                logger.info(f"   Skipping monitor startup for: {config_file}")
     
-    if not processes:
+    if not configs_ready_to_start:
         logger.error("❌ No configs ready to start")
         sys.exit(1)
     
-    logger.info(f"\n✅ Started {len(processes)} monitors")
+    # Create monitor instances
+    monitors = []
+    for config_file in configs_ready_to_start:
+        try:
+            logger.info(f"🚀 Creating monitor: {config_file}")
+            monitor = create_monitor(config_file)
+            monitors.append(monitor)
+        except Exception as e:
+            logger.error(f"❌ Failed to create monitor for {config_file}: {e}")
+    
+    if not monitors:
+        logger.error("❌ No monitors created successfully")
+        sys.exit(1)
+    
+    # Create centralized scheduler with monitors
+    scheduler = CentralizedScheduler(monitors, centralized_config)
+    
+    logger.info(f"\n✅ Created {len(monitors)} monitors")
     logger.info("Press Ctrl+C to stop all monitors")
-    logger.info("Output format: [ID] config_name message")
     logger.info("Centralized timing: Monitors will run sequentially when triggered")
     logger.info("")
     
@@ -648,18 +423,10 @@ async def main():
         # Stop the scheduler first
         scheduler.stop()
         
-        # Terminate all processes
-        for config_file, process, stdout_thread, stderr_thread in processes:
-            logger.info(f"Stopping: {config_file}")
-            process.terminate()
-        
-        # Wait for processes to terminate
-        for config_file, process, stdout_thread, stderr_thread in processes:
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                logger.warning(f"Force killing: {config_file}")
-                process.kill()
+        # Stop all monitors
+        for monitor in monitors:
+            logger.info(f"Stopping: {monitor.log_file}")
+            monitor.stop()
         
         logger.info("✅ All monitors stopped")
 

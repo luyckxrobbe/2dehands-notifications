@@ -15,13 +15,11 @@
     "description": "Scheduler behavior settings"
   },
   "monitoring": {
-    "enable_telegram_startup": true,
-    "enable_telegram_shutdown": true,
     "log_level": "INFO",
     "description": "General monitoring settings"
   },
   "racebike_check_gpt": {
-    "model": "gpt-4o-mini",
+    "model": "gpt-5-nano",
     "max_completion_tokens": 10,
     "temperature": 0.1,
     "prompt": "Is this a race bike (koersfiets) based on the title and description? Answer only 'YES' or 'NO'.",

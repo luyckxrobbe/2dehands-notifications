@@ -1,11 +1,13 @@
 {
   "url": "https://www.2dehands.be/l/fietsen-en-brommers/fietsen-heren-sportfietsen-en-toerfietsen/#Language:all-languages|sortBy:SORT_INDEX|sortOrder:DECREASING",
-  "max_bikes": 400,
+  "max_bikes": 300,
   "initial_pages": 10,
   "ongoing_pages": 3,
   "backup_file": "backups/2dehands-sportfietsen_backup.json",
   "log_file": "2dehands-sportfietsen.log",
   "init_buffer": false,
   "initial_check": false,
-  "enable_gpt_racebike_check": true
+  "enable_gpt_racebike_check": true,
+  "pi_optimized": true,
+  "request_delay": 2.0
 }

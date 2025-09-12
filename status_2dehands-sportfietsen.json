@@ -1,6 +1,0 @@
-{
-  "status": "error",
-  "timestamp": "2025-09-11T22:42:29.090768",
-  "config": "2dehands-sportfietsen.log",
-  "error": "Browser.close: Connection closed while reading from the driver"
-}

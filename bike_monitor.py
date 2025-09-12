@@ -17,8 +17,10 @@ from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
 from scrape_2dehands_live import scrape_bikes
+from scrape_2dehands_pi import scrape_bikes_pi
 from current_listings import CurrentListings
 from bike import Bike
+from bike_minimal import BikeMinimal, BikeMinimalListings
 from telegram_bot import TelegramBot
 from listing_scraper import ListingScraper
 from centralized_logging import setup_logging, get_logger
@@ -80,20 +82,24 @@ class BikeMonitor:
         else:
             logger.info("GPT race bike classifier disabled (not enabled in config file)")
         
+        # Pi optimization settings
+        self.pi_optimized = config.get('pi_optimized', False)
+        self.request_delay = config.get('request_delay', self.request_delay)
+        
         self.running = False
         self.centralized = centralized
         
-        # Try to load existing buffer from backup file
+        # Try to load existing minimal buffer from backup file
         if self.backup_file and self.backup_file.exists():
             try:
-                logger.info(f"🔄 Loading existing buffer from {self.backup_file}...")
-                self.previous_listings = CurrentListings.from_json_file(self.backup_file, max_bikes=self.max_bikes)
-                logger.info(f"✅ Successfully loaded buffer with {len(self.previous_listings)} bikes from backup")
+                logger.info(f"🔄 Loading existing minimal buffer from {self.backup_file}...")
+                self.previous_listings_minimal = BikeMinimalListings.from_json_file(self.backup_file, max_bikes=self.max_bikes)
+                logger.info(f"✅ Successfully loaded minimal buffer with {len(self.previous_listings_minimal)} bikes from backup")
                 
                 # Show some buffer statistics
-                if len(self.previous_listings) > 0:
+                if len(self.previous_listings_minimal) > 0:
                     # Get a sample of recent bikes
-                    recent_bikes = sorted(self.previous_listings.bikes, key=lambda b: b._scraped_at, reverse=True)[:3]
+                    recent_bikes = sorted(self.previous_listings_minimal.bikes, key=lambda b: b._scraped_at, reverse=True)[:3]
                     logger.info(f"📊 Buffer contains bikes from {recent_bikes[-1]._scraped_at.strftime('%Y-%m-%d %H:%M')} to {recent_bikes[0]._scraped_at.strftime('%Y-%m-%d %H:%M')}")
                     logger.info(f"🔗 Sample recent bikes:")
                     for i, bike in enumerate(recent_bikes, 1):
@@ -104,14 +110,14 @@ class BikeMonitor:
             except Exception as e:
                 logger.error(f"❌ Could not load existing buffer from {self.backup_file}: {e}")
                 logger.info("🆕 Starting with empty buffer")
-                self.previous_listings = CurrentListings(max_bikes=self.max_bikes)
+                self.previous_listings_minimal = BikeMinimalListings(max_bikes=self.max_bikes)
         else:
             if self.backup_file:
                 logger.info(f"📁 Backup file {self.backup_file} does not exist")
             else:
                 logger.info("📁 No backup file configured")
             logger.info("🆕 Starting with empty buffer")
-            self.previous_listings = CurrentListings(max_bikes=self.max_bikes)  # Rolling window of bikes
+            self.previous_listings_minimal = BikeMinimalListings(max_bikes=self.max_bikes)  # Rolling window of minimal bikes
         
         # Initialize Telegram bot
         bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -149,8 +155,8 @@ class BikeMonitor:
         logger.info(f"📱 Telegram chat ID: {self.chat_id}")
         
         # Show buffer status
-        if len(self.previous_listings) > 0:
-            logger.info(f"🧠 Buffer status: {len(self.previous_listings)} bikes loaded and ready")
+        if len(self.previous_listings_minimal) > 0:
+            logger.info(f"🧠 Buffer status: {len(self.previous_listings_minimal)} bikes loaded and ready")
         else:
             logger.info("🧠 Buffer status: Empty - will build buffer on first run")
             
@@ -308,8 +314,9 @@ class BikeMonitor:
         Returns:
             True if notification sent successfully, False if not from today or error
         """
-        # Safety check: don't process bikes that are already in our cache
-        if bike in self.previous_listings.bikes:
+        # Safety check: don't process bikes that are already in our minimal cache
+        bike_minimal = BikeMinimal(bike.title, bike.price, bike.href, bike._scraped_at)
+        if bike_minimal in self.previous_listings_minimal.bikes:
             logger.warning(f"Bike {bike.title} is already in cache - skipping notification check")
             return False
         
@@ -404,42 +411,25 @@ class BikeMonitor:
         
         return False
     
-    def _write_status_file(self, status: str, error: str = None) -> None:
+    def save_backup(self) -> None:
         """
-        Write status file for centralized scheduler communication.
-        
-        Args:
-            status: Status ('running', 'completed', 'error')
-            error: Error message if status is 'error'
+        Save the current minimal buffer to backup file.
+        This should be called when new listings are found to ensure data persistence.
         """
-        try:
-            # Create status file path based on log file name (without .log extension)
-            # This should match what the scheduler expects
-            log_name = Path(self.log_file).stem  # e.g., "2dehands-sportfietsen" from "2dehands-sportfietsen.log"
-            status_file = Path(f"status_{log_name}.json")
-            
-            status_data = {
-                'status': status,
-                'timestamp': datetime.now().isoformat(),
-                'config': self.log_file
-            }
-            
-            if error:
-                status_data['error'] = error
-            
-            with open(status_file, 'w') as f:
-                json.dump(status_data, f, indent=2)
-                
-        except Exception as e:
-            logger.warning(f"Failed to write status file: {e}")
+        if self.backup_file:
+            try:
+                self.previous_listings_minimal.to_json_file(self.backup_file)
+                logger.info(f"💾 Backed up {len(self.previous_listings_minimal)} minimal listings to {self.backup_file}")
+                logger.debug(f"📁 Backup file size: {self.backup_file.stat().st_size / 1024 / 1024:.2f} MB")
+            except Exception as e:
+                logger.error(f"❌ Failed to save backup: {e}")
+        else:
+            logger.debug("No backup file configured - skipping backup")
     
     async def check_for_new_listings(self) -> None:
         """
         Check for new listings and send notifications only for bikes posted today.
         """
-        # Write status file to indicate scraping has started
-        if self.centralized:
-            self._write_status_file('running')
         
         try:
             # Determine how many pages to scrape
@@ -451,51 +441,76 @@ class BikeMonitor:
                 logger.info(f"Starting ongoing bike listing check (reading {pages_to_scrape} pages)...")
             
             # Scrape current listings directly as objects
-            current_listings = await scrape_bikes(
-                url=self.url, 
-                headless=True, 
-                max_pages=pages_to_scrape,
-                proxies=self.proxies if self.proxies else None,
-                request_delay=self.request_delay
-            )
+            if self.pi_optimized:
+                current_listings = await scrape_bikes_pi(
+                    url=self.url, 
+                    max_pages=pages_to_scrape,
+                    proxies=self.proxies if self.proxies else None,
+                    request_delay=self.request_delay
+                )
+            else:
+                current_listings = await scrape_bikes(
+                    url=self.url, 
+                    headless=True, 
+                    max_pages=pages_to_scrape,
+                    proxies=self.proxies if self.proxies else None,
+                    request_delay=self.request_delay
+                )
             
             # Use rolling window logic to find truly new bikes
-            if len(self.previous_listings) > 0:
-                initial_new_count = len([bike for bike in current_listings.bikes if bike not in self.previous_listings.bikes])
-                truly_new_bikes = self.previous_listings.update_with_new_listings(current_listings)
+            if len(self.previous_listings_minimal) > 0:
+                # Convert current listings to minimal format for comparison
+                current_minimal = [BikeMinimal(bike.title, bike.price, bike.href, bike._scraped_at) for bike in current_listings.bikes]
+                initial_new_count = len([bike for bike in current_minimal if bike not in self.previous_listings_minimal.bikes])
+                truly_new_minimal = [bike for bike in current_minimal if bike not in self.previous_listings_minimal.bikes]
                 
                 logger.info(f"Scraped {len(current_listings)} total listings")
                 logger.info(f"Found {initial_new_count} listings not in rolling window")
-                logger.info(f"After duplicate detection: {len(truly_new_bikes)} truly new listings")
+                logger.info(f"After duplicate detection: {len(truly_new_minimal)} truly new listings")
                 
                 # Check if we found too many new bikes (monitor was likely offline)
-                if len(truly_new_bikes) > 20:
-                    logger.info(f"Found {len(truly_new_bikes)} new bikes (>20) - monitor was likely offline. Adding all to buffer without notifications.")
-                    # Just add all bikes to cache without processing notifications
-                    self.previous_listings.add_bikes(truly_new_bikes)
-                    logger.info(f"Added {len(truly_new_bikes)} bikes to buffer (no notifications sent)")
+                if len(truly_new_minimal) > 20:
+                    logger.info(f"Found {len(truly_new_minimal)} new bikes (>20) - monitor was likely offline. Adding all to buffer without notifications.")
+                    # Just add all bikes to minimal cache without processing notifications
+                    self.previous_listings_minimal.add_bikes(truly_new_minimal)
+                    logger.info(f"Added {len(truly_new_minimal)} bikes to minimal buffer (no notifications sent)")
+                    # Save backup since we found new listings
+                    self.save_backup()
                     return
                 
                 # Process truly new bikes and add them to cache after processing
                 notifications_sent = 0
-                processed_bikes = []
+                processed_bikes_minimal = []
                 
-                for bike in truly_new_bikes:
-                    # This method will check if it's from today and only send if it is
-                    success = await self.check_and_send_bike_notification(bike)
-                    if success:
-                        notifications_sent += 1
+                for bike_minimal in truly_new_minimal:
+                    # Find the corresponding full bike object
+                    full_bike = None
+                    for bike in current_listings.bikes:
+                        if (bike.title == bike_minimal.title and 
+                            bike.price == bike_minimal.price and 
+                            bike.href == bike_minimal.href):
+                            full_bike = bike
+                            break
+                    
+                    if full_bike:
+                        # This method will check if it's from today and only send if it is
+                        success = await self.check_and_send_bike_notification(full_bike)
+                        if success:
+                            notifications_sent += 1
                     
                     # Add bike to processed list regardless of notification success
-                    # This ensures we don't re-process the same bike
-                    processed_bikes.append(bike)
+                    processed_bikes_minimal.append(bike_minimal)
                     
                     # Small delay between checks to avoid rate limiting
                     await asyncio.sleep(2)
                 
-                # Add all processed bikes to cache to prevent re-processing
-                self.previous_listings.add_bikes(processed_bikes)
-                logger.info(f"Added {len(processed_bikes)} processed bikes to cache")
+                # Add all processed bikes to minimal cache to prevent re-processing
+                self.previous_listings_minimal.add_bikes(processed_bikes_minimal)
+                logger.info(f"Added {len(processed_bikes_minimal)} processed bikes to minimal cache")
+                
+                # Save backup since we found new listings (regardless of notifications sent)
+                if len(processed_bikes_minimal) > 0:
+                    self.save_backup()
                 
                 if notifications_sent > 0:
                     logger.info(f"Sent {notifications_sent} notifications for today's listings")
@@ -503,35 +518,25 @@ class BikeMonitor:
                     logger.info("No new listings from today found")
             else:
                 if self.is_initial_run:
-                    logger.info(f"Initial run - building buffer with {len(current_listings)} listings from {pages_to_scrape} pages")
+                    logger.info(f"Initial run - building minimal buffer with {len(current_listings)} listings from {pages_to_scrape} pages")
                 else:
                     logger.info("First run - no previous listings to compare with")
-                # On first run, just store all current listings
-                self.previous_listings = current_listings
+                # On first run, convert all current listings to minimal format and store
+                current_minimal = [BikeMinimal(bike.title, bike.price, bike.href, bike._scraped_at) for bike in current_listings.bikes]
+                self.previous_listings_minimal = BikeMinimalListings(current_minimal, max_bikes=self.max_bikes)
+                # Save backup on initial run
+                self.save_backup()
             
             # Mark initial run as complete
             if self.is_initial_run:
                 self.is_initial_run = False
                 logger.info("Initial buffer building complete - switching to ongoing monitoring mode")
             
-            # Save backup to file (essential for preventing duplicates on restart)
-            if self.backup_file:
-                self.previous_listings.to_json_file(self.backup_file)
-                logger.info(f"💾 Backed up {len(self.previous_listings)} listings to {self.backup_file}")
-                logger.debug(f"📁 Backup file size: {self.backup_file.stat().st_size / 1024 / 1024:.2f} MB")
-            
-            logger.info(f"Rolling window now contains {len(self.previous_listings)} bikes")
+            logger.info(f"Rolling window now contains {len(self.previous_listings_minimal)} bikes")
             logger.info("Bike listing check completed successfully")
-            
-            # Write status file to indicate scraping has completed successfully
-            if self.centralized:
-                self._write_status_file('completed')
             
         except Exception as e:
             logger.error(f"Error during bike listing check: {e}")
-            # Write status file to indicate scraping failed
-            if self.centralized:
-                self._write_status_file('error', str(e))
     
     async def run(self) -> None:
         """
@@ -747,19 +752,19 @@ async def main():
         monitor.stop()
     
     # Send shutdown notification
-    shutdown_message = f"🚴‍♂️ <b>Enhanced Bike Monitor Stopped</b>\n\n"
-    shutdown_message += f"URL: {config['url']}\n"
-    shutdown_message += f"Mode: Only notified for today's listings\n"
-    shutdown_message += f"Stopped at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    # shutdown_message = f"🚴‍♂️ <b>Enhanced Bike Monitor Stopped</b>\n\n"
+    # shutdown_message += f"URL: {config['url']}\n"
+    # shutdown_message += f"Mode: Only notified for today's listings\n"
+    # shutdown_message += f"Stopped at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     
-    try:
-        await monitor.telegram_bot.send_message(
-            chat_id=monitor.chat_id,
-            message=shutdown_message,
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        logger.error(f"Error sending shutdown notification: {e}")
+    # try:
+    #     await monitor.telegram_bot.send_message(
+    #         chat_id=monitor.chat_id,
+    #         message=shutdown_message,
+    #         parse_mode='HTML'
+    #     )
+    # except Exception as e:
+    #     logger.error(f"Error sending shutdown notification: {e}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,13 @@
+{
+  "url": "https://www.marktplaats.nl/l/fietsen-en-brommers/fietsen-racefietsen/f/carbon/3584/#sortBy:SORT_INDEX|sortOrder:DECREASING",
+  "max_bikes": 450,
+  "initial_pages": 15,
+  "ongoing_pages": 5,
+  "backup_file": "backups/marktplaats_backup.json",
+  "log_file": "marktplaats.log",
+  "init_buffer": false,
+  "initial_check": false,
+  "enable_gpt_racebike_check": false,
+  "pi_optimized": true,
+  "request_delay": 2.0
+}
