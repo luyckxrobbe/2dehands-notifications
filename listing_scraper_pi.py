@@ -58,10 +58,15 @@ class ListingScraperPi:
         try:
             logger.debug(f"Scraping listing: {url}")
             
-            # Navigate to the listing page with Pi-optimized timeout
-            page = await self.navigator.navigate_to_page(url, timeout=15000)  # Pi-optimized: 15s timeout
-            
+            # Create a new page and navigate to the listing page
+            page = await self.navigator.new_page()
             if not page:
+                logger.error(f"Failed to create new page for: {url}")
+                return {}
+            
+            # Navigate to the listing page with Pi-optimized timeout
+            success = await self.navigator.navigate_to(page, url, wait_until="domcontentloaded")
+            if not success:
                 logger.error(f"Failed to navigate to listing page: {url}")
                 return {}
             
