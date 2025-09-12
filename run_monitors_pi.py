@@ -149,7 +149,7 @@ def load_config(config_file: str) -> Dict[str, Any]:
         return {}
 
 
-def load_centralized_config(config_file: str = "configs/centralized-config-pi.json") -> Dict[str, Any]:
+def load_centralized_config(config_file: str = "config-pi/centralized-config.json") -> Dict[str, Any]:
     """Load Pi-optimized centralized configuration."""
     try:
         if Path(config_file).exists():
