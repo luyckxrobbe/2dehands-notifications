@@ -3,8 +3,7 @@
     "base_interval": 600,
     "time_based_intervals": {
       "01:00-07:00": 1800,
-      "07:00-16:00": 600,
-      "16:00-22:00": 300
+      "07:00-22:00": 240
     },
     "monitor_delay": 15,
     "description": "Raspberry Pi optimized timing - longer intervals to reduce load"
