@@ -185,7 +185,7 @@ def create_monitor_pi(config_file: str) -> BikeMonitor:
     
     # Add default check_interval if missing (use centralized config default)
     if 'check_interval' not in config:
-        centralized_config = CentralizedLogger.load_centralized_config()
+        centralized_config = load_centralized_config()
         default_interval = centralized_config.get('centralized_timing', {}).get('base_interval', 600)
         config['check_interval'] = default_interval
     
