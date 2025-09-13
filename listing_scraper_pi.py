@@ -85,6 +85,7 @@ class ListingScraperPi:
                 'images': await self._extract_images(page),
                 'attributes': await self._extract_attributes(page),
                 'view_count': await self._extract_view_count(page),
+                'stats': await self._extract_stats(page),
                 'listing_id': self._extract_listing_id(url),
                 'scraped_at': datetime.now(timezone.utc).isoformat()
             }
@@ -297,24 +298,24 @@ class ListingScraperPi:
             
             # Handle "gisteren" (yesterday)
             if 'gisteren' in date_text_lower:
-                yesterday = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-                yesterday = yesterday.replace(day=yesterday.day - 1)
+                from datetime import timedelta
+                yesterday = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
                 return yesterday.isoformat()
             
             # Handle "X dagen geleden" (X days ago)
             days_ago_match = re.search(r'(\d{1,2})\s+dagen\s+geleden', date_text_lower)
             if days_ago_match:
+                from datetime import timedelta
                 days_ago = int(days_ago_match.group(1))
-                past_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-                past_date = past_date.replace(day=past_date.day - days_ago)
+                past_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days_ago)
                 return past_date.isoformat()
             
-            # Handle "X weken geleden" (X weeks ago)
-            weeks_ago_match = re.search(r'(\d{1,2})\s+weken\s+geleden', date_text_lower)
+            # Handle "X weken geleden" (X weeks ago) or "X week geleden" (X week ago)
+            weeks_ago_match = re.search(r'(\d{1,2})\s+week(?:en)?\s+geleden', date_text_lower)
             if weeks_ago_match:
+                from datetime import timedelta
                 weeks_ago = int(weeks_ago_match.group(1))
-                past_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-                past_date = past_date.replace(day=past_date.day - (weeks_ago * 7))
+                past_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(weeks=weeks_ago)
                 return past_date.isoformat()
             
             # Handle specific dates
@@ -451,6 +452,31 @@ class ListingScraperPi:
         except Exception as e:
             logger.debug(f"Error extracting view count: {e}")
             return None
+    
+    async def _extract_stats(self, page: Page) -> Dict[str, int]:
+        """Extract stats (views, favorites) for the listing."""
+        try:
+            stats = {}
+            stats_elements = await page.query_selector_all('.Report-stat')
+            
+            for stat in stats_elements:
+                try:
+                    text = await stat.text_content()
+                    if text:
+                        if 'bekeken' in text.lower():
+                            views_match = re.search(r'(\d+)x', text)
+                            if views_match:
+                                stats['views'] = int(views_match.group(1))
+                        elif 'bewaard' in text.lower():
+                            favorites_match = re.search(r'(\d+)x', text)
+                            if favorites_match:
+                                stats['favorites'] = int(favorites_match.group(1))
+                except Exception:
+                    continue
+            
+            return stats
+        except Exception:
+            return {}
     
     def _extract_listing_id(self, url: str) -> str:
         """Extract listing ID from URL."""

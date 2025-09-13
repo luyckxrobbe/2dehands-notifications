@@ -28,7 +28,7 @@ class RaceBikeClassifier:
         Args:
             config: Configuration dictionary with GPT settings from centralized config
         """
-        self.model = config.get('model', 'gpt-5-nano')
+        self.model = config.get('model', 'gpt-4o-mini')
         self.max_completion_tokens = config.get('max_completion_tokens', 10)
         self.temperature = config.get('temperature', 0.1)
         self.prompt_template = config.get('prompt', 

@@ -15,6 +15,7 @@ from pathlib import Path
 from datetime import datetime, time
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
+import openrouteservice
 
 from scrape_2dehands_live import scrape_bikes
 from scrape_2dehands_pi import scrape_bikes_pi
@@ -199,6 +200,133 @@ class BikeMonitor:
         # Fallback to default interval if no time range matches
         return self.check_interval
     
+    def geocode_location(self, location_text: str, country_code: str) -> Optional[tuple]:
+        """
+        Geocode a location using OpenRouteService API.
+        
+        Args:
+            location_text: The location string to geocode
+            country_code: Country code ('BE' for Belgium, 'NL' for Netherlands)
+            
+        Returns:
+            Tuple of (longitude, latitude) if successful, None otherwise
+        """
+        try:
+            # Get API key from environment
+            api_key = os.getenv('OPEN_ROUTE_SERVICE_API_KEY')
+            if not api_key:
+                logger.warning("OPEN_ROUTE_SERVICE_API_KEY not found in environment variables")
+                return None
+            
+            # Initialize ORS client
+            ors_client = openrouteservice.Client(key=api_key)
+            
+            # Geocode the location
+            geocode_result = ors_client.pelias_search(
+                text=f"{location_text}, {country_code}"
+            )
+            
+            if geocode_result and geocode_result.get('features'):
+                coordinates = geocode_result['features'][0]['geometry']['coordinates']
+                logger.info(f"Successfully geocoded '{location_text}' to {coordinates}")
+                return tuple(coordinates)  # (longitude, latitude)
+            else:
+                logger.warning(f"Geocoding failed: No results found for '{location_text}' in {country_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Geocoding error for '{location_text}': {e}")
+            return None
+    
+    def calculate_travel_time(self, start_coords: tuple, end_coords: tuple) -> Optional[float]:
+        """
+        Calculate driving time between two coordinates using OpenRouteService.
+        
+        Args:
+            start_coords: Starting coordinates as (longitude, latitude)
+            end_coords: Destination coordinates as (longitude, latitude)
+            
+        Returns:
+            Travel time in minutes if successful, None otherwise
+        """
+        try:
+            # Get API key from environment
+            api_key = os.getenv('OPEN_ROUTE_SERVICE_API_KEY')
+            if not api_key:
+                logger.warning("OPEN_ROUTE_SERVICE_API_KEY not found in environment variables")
+                return None
+            
+            # Initialize ORS client
+            ors_client = openrouteservice.Client(key=api_key)
+            
+            # Calculate route
+            route = ors_client.directions(
+                coordinates=[start_coords, end_coords],
+                profile='driving-car',
+                format='geojson'
+            )
+            
+            if route and route.get('features'):
+                duration = route['features'][0]['properties']['segments'][0]['duration']
+                travel_time_minutes = duration / 60  # Convert seconds to minutes
+                logger.info(f"Travel time calculated: {travel_time_minutes:.1f} minutes")
+                return travel_time_minutes
+            else:
+                logger.warning("No route found between coordinates")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Travel time calculation error: {e}")
+            return None
+    
+    def get_travel_time_info(self, bike: Bike, detailed_info: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Get travel time information for a bike listing.
+        
+        Args:
+            bike: Bike object
+            detailed_info: Optional detailed information from listing scraper
+            
+        Returns:
+            Travel time information string or empty string if calculation fails
+        """
+        # Determine country code based on URL
+        country_code = 'BE'  # Default to Belgium
+        if 'marktplaats' in bike.href.lower():
+            country_code = 'NL'
+        
+        # Get location from detailed info if available, otherwise use bike location
+        location_text = bike.location
+        if detailed_info and detailed_info.get('location'):
+            location_text = detailed_info['location']
+        
+        if not location_text:
+            logger.warning("No location information available for travel time calculation")
+            return ""
+        
+        # Geocode the seller's location
+        seller_coords = self.geocode_location(location_text, country_code)
+        if not seller_coords:
+            return ""
+        
+        # Calculate travel time from fixed coordinates (51.140925, 5.609748)
+        start_coords = (5.609748, 51.140925)  # (longitude, latitude)
+        travel_time = self.calculate_travel_time(start_coords, seller_coords)
+        
+        if travel_time is not None:
+            # Format travel time as hours and minutes (e.g., "1u25m")
+            hours = int(travel_time // 60)
+            minutes = int(travel_time % 60)
+            
+            if hours > 0:
+                time_str = f"{hours}u{minutes:02d}m"
+            else:
+                time_str = f"{minutes}m"
+            
+            return f"<b>Reistijd:</b> {time_str}\n"
+        else:
+            return ""
+    
     def format_bike_message(self, bike: Bike, detailed_info: Optional[Dict[str, Any]] = None) -> str:
         """
         Format a bike listing into a nice Telegram message.
@@ -240,16 +368,19 @@ class BikeMonitor:
                 )
             is_today = scraper.is_today(detailed_info['date_posted'])
         
-        # Create message with today indicator
+        # Create message with title as first line
         today_indicator = " 🆕" if is_today else ""
-        message = f"🚴‍♂️ <b>New Bike Listing!</b>{today_indicator}\n\n"
-        message += f"<b>Title:</b> {bike.title}\n"
-        message += f"<b>Brand:</b> {brand}\n"
-        message += f"<b>Price:</b> {price_str}\n"
-        message += f"<b>Condition:</b> {condition}\n"
-        message += f"<b>Size:</b> {frame_size}\n"
-        message += f"<b>Location:</b> {bike.location}\n"
-        message += f"<b>Seller:</b> {bike.seller}\n"
+        message = f"🚴‍♂️ <b>{bike.title}</b> 🚴‍♂️{today_indicator}\n\n"
+        message += f"<b>Prijs:</b> {price_str}\n"
+        message += f"<b>Locatie:</b> {bike.location}\n"
+        
+        # Add travel time information
+        travel_time_info = self.get_travel_time_info(bike, detailed_info)
+        if travel_time_info:
+            message += travel_time_info
+        
+        message += f"<b>Verkoper:</b> {bike.seller}\n"
+        
         # Format date with time - use the actual listing posting time if available
         date_display = bike.date  # fallback to search results date
         if detailed_info and detailed_info.get('date_posted'):
@@ -275,18 +406,7 @@ class BikeMonitor:
             except Exception:
                 pass
         
-        message += f"<b>Date Posted:</b> {date_display}\n\n"
-        
-        # Add detailed specifications if available
-        if detailed_info and detailed_info.get('specifications'):
-            specs = detailed_info['specifications']
-            if specs:
-                message += "<b>Specifications:</b>\n"
-                for key, value in list(specs.items())[:5]:  # Show first 5 specs
-                    # Convert key to readable format
-                    readable_key = key.replace('_', ' ').title()
-                    message += f"• {readable_key}: {value}\n"
-                message += "\n"
+        message += f"<b>Geplaatst:</b> {date_display}\n\n"
         
         # Add description (prefer detailed description if available)
         description = ""
@@ -297,29 +417,20 @@ class BikeMonitor:
         
         if description:
             desc = description[:300] + "..." if len(description) > 300 else description
-            message += f"<b>Description:</b> {desc}\n\n"
-        
-        # Add seller info if available
-        if detailed_info and detailed_info.get('seller'):
-            seller = detailed_info['seller']
-            if seller.get('type'):
-                message += f"<b>Seller Type:</b> {seller['type']}\n"
-            if seller.get('years_on_platform'):
-                message += f"<b>Years on Platform:</b> {seller['years_on_platform']}\n"
-            message += "\n"
+            message += f"<b>Beschrijving:</b> {desc}\n\n"
         
         # Add stats if available
         if detailed_info and detailed_info.get('stats'):
             stats = detailed_info['stats']
             if stats.get('views'):
-                message += f"👁️ {stats['views']} views"
+                message += f"👁️ {stats['views']} bekeken"
             if stats.get('favorites'):
-                message += f" ❤️ {stats['favorites']} favorites"
+                message += f" ❤️ {stats['favorites']} favorieten"
             if stats.get('views') or stats.get('favorites'):
                 message += "\n\n"
         
         # Add link
-        message += f"🔗 <a href='{bike.href}'>View Listing</a>"
+        message += f"🔗 <a href='{bike.href}'>Bekijk advertentie</a>"
         
         return message
     
@@ -371,15 +482,18 @@ class BikeMonitor:
                     
                     detailed_info = await self.listing_scraper.scrape_listing(bike.href)
                     
-                    # Check if it's from today
+                    # Check if it's from today using the actual posting date
+                    is_today = False
                     if detailed_info and detailed_info.get('date_posted'):
-                        logger.debug(f"Found date_posted for {bike.title}: {detailed_info['date_posted']}")
+                        logger.info(f"Found date_posted for {bike.title}: {detailed_info['date_posted']}")
+                        # Use the Pi-optimized scraper's is_today method
+                        is_today = self.listing_scraper.is_today(detailed_info['date_posted'])
+                        logger.info(f"Bike posting date check: {is_today} for {bike.title}")
                     else:
-                        logger.debug(f"No date_posted found for {bike.title}. Detailed info keys: {list(detailed_info.keys()) if detailed_info else 'None'}")
-                    
-                    # Use scraped_at timestamp instead of unreliable website date
-                    # Check if bike was scraped today (more reliable than website date)
-                    is_today = bike.is_scraped_today()
+                        logger.warning(f"No date_posted found for {bike.title}. Detailed info keys: {list(detailed_info.keys()) if detailed_info else 'None'}")
+                        # Fallback to scraped_at timestamp if no date_posted available
+                        is_today = bike.is_scraped_today()
+                        logger.info(f"Using scraped_at fallback: {is_today} for {bike.title}")
                     
                     if is_today:
                         # Check if seller is a business seller
