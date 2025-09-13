@@ -250,21 +250,32 @@ class BikeMonitor:
         message += f"<b>Size:</b> {frame_size}\n"
         message += f"<b>Location:</b> {bike.location}\n"
         message += f"<b>Seller:</b> {bike.seller}\n"
-        # Format date with time if available
-        date_display = bike.date
+        # Format date with time - use the actual listing posting time if available
+        date_display = bike.date  # fallback to search results date
         if detailed_info and detailed_info.get('date_posted'):
             try:
-                # Parse the ISO date to extract time
+                # Parse the ISO date from the individual listing page
                 from datetime import datetime
-                parsed_date = datetime.fromisoformat(detailed_info['date_posted'].replace('Z', '+00:00'))
-                # Format as "4 sep. '25, 15:55" style
-                time_str = parsed_date.strftime('%H:%M')
+                listing_datetime = datetime.fromisoformat(detailed_info['date_posted'].replace('Z', '+00:00'))
+                # Format as readable date and time
+                date_display = listing_datetime.strftime('%d/%m/%Y %H:%M')
+            except Exception as e:
+                logger.debug(f"Could not parse date_posted '{detailed_info['date_posted']}': {e}")
+                # Fallback to search results date with scraped time
+                try:
+                    time_str = bike._scraped_at.strftime('%H:%M')
+                    date_display = f"{bike.date}, {time_str}"
+                except Exception:
+                    pass
+        else:
+            # No detailed info available, use search results date with scraped time
+            try:
+                time_str = bike._scraped_at.strftime('%H:%M')
                 date_display = f"{bike.date}, {time_str}"
             except Exception:
-                # If parsing fails, just use the original date
                 pass
         
-        message += f"<b>Date:</b> {date_display}\n\n"
+        message += f"<b>Date Posted:</b> {date_display}\n\n"
         
         # Add detailed specifications if available
         if detailed_info and detailed_info.get('specifications'):

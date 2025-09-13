@@ -283,12 +283,10 @@ class ListingScraperPi:
         try:
             # Common Dutch date patterns
             date_patterns = [
+                r'(\d{1,2})\s+(jan|feb|mrt|apr|mei|jun|jul|aug|sep|okt|nov|dec)\.?\s*\'?(\d{2,4})(?:,\s*(\d{1,2}):(\d{2}))?',  # Pattern for "25 aug '25, 14:29"
                 r'(\d{1,2})\s+(jan|feb|mrt|apr|mei|jun|jul|aug|sep|okt|nov|dec)\s+(\d{4})',
                 r'(\d{1,2})\s+(januari|februari|maart|april|mei|juni|juli|augustus|september|oktober|november|december)\s+(\d{4})',
-                r'vandaag',
-                r'gisteren',
-                r'(\d{1,2})\s+dagen\s+geleden',
-                r'(\d{1,2})\s+weken\s+geleden'
+
             ]
             
             date_text_lower = date_text.lower().strip()
@@ -323,32 +321,49 @@ class ListingScraperPi:
             for pattern in date_patterns:
                 match = re.search(pattern, date_text_lower)
                 if match:
-                    if len(match.groups()) == 3:
-                        day, month, year = match.groups()
-                        
-                        # Convert Dutch month names to numbers
-                        month_map = {
-                            'jan': 1, 'januari': 1,
-                            'feb': 2, 'februari': 2,
-                            'mrt': 3, 'maart': 3,
-                            'apr': 4, 'april': 4,
-                            'mei': 5,
-                            'jun': 6, 'juni': 6,
-                            'jul': 7, 'juli': 7,
-                            'aug': 8, 'augustus': 8,
-                            'sep': 9, 'september': 9,
-                            'okt': 10, 'oktober': 10,
-                            'nov': 11, 'november': 11,
-                            'dec': 12, 'december': 12
-                        }
-                        
-                        month_num = month_map.get(month.lower())
-                        if month_num:
-                            try:
-                                parsed_date = datetime(int(year), month_num, int(day), tzinfo=timezone.utc)
-                                return parsed_date.isoformat()
-                            except ValueError:
-                                continue
+                    groups = match.groups()
+                    
+                    # Handle the new pattern with time: "25 aug '25, 14:29"
+                    if len(groups) == 5 and groups[3] is not None and groups[4] is not None:
+                        day, month, year, hour, minute = groups
+                        hour = int(hour)
+                        minute = int(minute)
+                    elif len(groups) == 3:
+                        day, month, year = groups
+                        hour = 0
+                        minute = 0
+                    else:
+                        continue
+                    
+                    # Convert Dutch month names to numbers
+                    month_map = {
+                        'jan': 1, 'januari': 1,
+                        'feb': 2, 'februari': 2,
+                        'mrt': 3, 'maart': 3,
+                        'apr': 4, 'april': 4,
+                        'mei': 5,
+                        'jun': 6, 'juni': 6,
+                        'jul': 7, 'juli': 7,
+                        'aug': 8, 'augustus': 8,
+                        'sep': 9, 'september': 9,
+                        'okt': 10, 'oktober': 10,
+                        'nov': 11, 'november': 11,
+                        'dec': 12, 'december': 12
+                    }
+                    
+                    month_num = month_map.get(month.lower())
+                    if month_num:
+                        try:
+                            # Handle 2-digit years (e.g., '25 -> 2025)
+                            if len(year) == 2:
+                                year = 2000 + int(year)
+                            else:
+                                year = int(year)
+                            
+                            parsed_date = datetime(year, month_num, int(day), hour, minute, tzinfo=timezone.utc)
+                            return parsed_date.isoformat()
+                        except ValueError:
+                            continue
             
             return None
             
