@@ -43,13 +43,13 @@ class CentralizedSchedulerPi:
             timing_config = self.centralized_config['centralized_timing']
             self.base_interval = timing_config.get('base_interval', 600)  # 10 minutes default
             self.time_based_intervals = timing_config.get('time_based_intervals', {})
-            self.monitor_delay = timing_config.get('monitor_delay', 15)  # 15 seconds between monitors
+            self.monitor_delay = timing_config.get('monitor_delay', 15)  # Use config value
             logger.info(f"🕐 Using Pi-optimized timing - base interval: {self.base_interval} seconds")
         else:
             # Pi-optimized defaults
             self.base_interval = 600  # 10 minutes
             self.time_based_intervals = {}
-            self.monitor_delay = 15
+            self.monitor_delay = 15  # Fallback default
             logger.warning(f"⚠️  No centralized timing config found, using Pi defaults - base interval: {self.base_interval} seconds")
     
     def _get_current_interval(self) -> int:
@@ -183,9 +183,11 @@ def create_monitor_pi(config_file: str) -> BikeMonitor:
     """Create a Pi-optimized BikeMonitor instance."""
     config = load_config(config_file)
     
-    # Add default check_interval if missing
+    # Add default check_interval if missing (use centralized config default)
     if 'check_interval' not in config:
-        config['check_interval'] = 600  # 10 minutes default for Pi
+        centralized_config = CentralizedLogger.load_centralized_config()
+        default_interval = centralized_config.get('centralized_timing', {}).get('base_interval', 600)
+        config['check_interval'] = default_interval
     
     # Ensure Pi optimization is enabled
     config['pi_optimized'] = True

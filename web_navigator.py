@@ -25,7 +25,7 @@ class WebNavigator:
         proxies: Optional[List[str]] = None,
         proxy_rotation: str = "round_robin",
         user_agents: Optional[List[str]] = None,
-        request_delay: float = 1.0,
+        request_delay: float = None,  # Will use config value
         page_timeout: int = 30000
     ):
         """
@@ -49,7 +49,7 @@ class WebNavigator:
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0'
         ]
-        self.request_delay = request_delay
+        self.request_delay = request_delay or 1.0  # Fallback to 1.0 if not provided
         self.page_timeout = page_timeout
         
         # Internal state

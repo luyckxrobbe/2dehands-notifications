@@ -44,13 +44,13 @@ class CentralizedScheduler:
             timing_config = self.centralized_config['centralized_timing']
             self.base_interval = timing_config.get('base_interval', 300)
             self.time_based_intervals = timing_config.get('time_based_intervals', {})
-            self.monitor_delay = timing_config.get('monitor_delay', 10)
+            self.monitor_delay = timing_config.get('monitor_delay', 10)  # Use config value
             logger.info(f"🕐 Using centralized timing config - base interval: {self.base_interval} seconds")
         else:
             # Default values if no centralized config
             self.base_interval = 300
             self.time_based_intervals = {}
-            self.monitor_delay = 10
+            self.monitor_delay = 10  # Fallback default
             logger.warning(f"⚠️  No centralized timing config found, using defaults - base interval: {self.base_interval} seconds")
         
     
@@ -233,7 +233,9 @@ def create_monitor(config_file: str) -> BikeMonitor:
     
     # Add default check_interval if missing (for centralized mode)
     if 'check_interval' not in config:
-        config['check_interval'] = 300  # Default 5 minutes, not used in centralized mode
+        centralized_config = CentralizedLogger.load_centralized_config()
+        default_interval = centralized_config.get('centralized_timing', {}).get('base_interval', 300)
+        config['check_interval'] = default_interval
     
     # Create monitor instance in centralized mode since we handle timing ourselves
     monitor = BikeMonitor(config, skip_initial=True, centralized=True)

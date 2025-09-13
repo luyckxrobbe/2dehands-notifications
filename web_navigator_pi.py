@@ -22,7 +22,7 @@ class WebNavigatorPi:
         self, 
         headless: bool = True,
         proxies: Optional[List[str]] = None,
-        request_delay: float = 2.0,  # Increased delay for Pi
+        request_delay: float = None,  # Will use config value
         page_timeout: int = 15000,   # Reduced timeout
         max_pages_per_session: int = 5  # Limit pages per browser session
     ):
@@ -38,7 +38,7 @@ class WebNavigatorPi:
         """
         self.headless = True  # Always headless on Pi
         self.proxies = proxies or []
-        self.request_delay = request_delay
+        self.request_delay = request_delay or 2.0  # Fallback to 2.0 for Pi if not provided
         self.page_timeout = page_timeout
         self.max_pages_per_session = max_pages_per_session
         

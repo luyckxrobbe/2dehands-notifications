@@ -27,7 +27,7 @@ class ListingScraper:
         self, 
         headless: bool = True,
         proxies: Optional[List[str]] = None,
-        request_delay: float = 1.0
+        request_delay: float = None  # Will use config value
     ):
         self.navigator = WebNavigator(
             headless=headless,

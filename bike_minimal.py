@@ -143,21 +143,23 @@ class BikeMinimalListings:
     Minimal listings collection for backup storage with only essential fields.
     """
     
-    def __init__(self, bikes: Optional[List[BikeMinimal]] = None, max_bikes: int = 300):
+    def __init__(self, bikes: Optional[List[BikeMinimal]] = None, max_bikes: int = None, enforce_limit: bool = True):
         """
         Initialize with optional list of minimal bikes.
         
         Args:
             bikes: Optional list of BikeMinimal objects
             max_bikes: Maximum number of bikes to keep in rolling window
+            enforce_limit: Whether to enforce max_bikes limit immediately (False when loading from backup)
         """
         self.bikes: List[BikeMinimal] = bikes or []
-        self.max_bikes = max_bikes
+        self.max_bikes = max_bikes or 300  # Default fallback only if not provided
         self._last_updated = datetime.now()
-        self._enforce_max_bikes()
+        if enforce_limit:
+            self._enforce_max_bikes()
     
     @classmethod
-    def from_json_file(cls, file_path, max_bikes: int = 300) -> 'BikeMinimalListings':
+    def from_json_file(cls, file_path, max_bikes: int = None) -> 'BikeMinimalListings':
         """
         Load from JSON file with only essential fields.
         
@@ -180,7 +182,7 @@ class BikeMinimalListings:
                 if isinstance(item, dict):
                     bikes.append(BikeMinimal.from_dict(item))
             
-            return cls(bikes, max_bikes=max_bikes)
+            return cls(bikes, max_bikes=max_bikes, enforce_limit=False)
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             import logging
             logger = logging.getLogger(__name__)
@@ -188,7 +190,7 @@ class BikeMinimalListings:
             return cls(max_bikes=max_bikes)
     
     @classmethod
-    def from_full_bikes(cls, full_bikes: List, max_bikes: int = 300) -> 'BikeMinimalListings':
+    def from_full_bikes(cls, full_bikes: List, max_bikes: int = None) -> 'BikeMinimalListings':
         """
         Create minimal listings from full Bike objects.
         

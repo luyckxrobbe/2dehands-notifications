@@ -29,7 +29,7 @@ class ListingScraperPi:
         self, 
         headless: bool = True,
         proxies: Optional[List[str]] = None,
-        request_delay: float = 2.0  # Pi-optimized: longer delay
+        request_delay: float = None  # Will use config value
     ):
         self.navigator = WebNavigatorPi(
             headless=headless,

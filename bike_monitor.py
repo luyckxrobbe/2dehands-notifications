@@ -52,7 +52,7 @@ class BikeMonitor:
         self.url = config['url']
         # In centralized mode, check_interval is not needed as timing is handled centrally
         if centralized:
-            self.check_interval = 300  # Default value, not used in centralized mode
+            self.check_interval = config.get('check_interval', 300)  # Use config value, fallback to 300
             self.time_based_intervals = {}  # Not used in centralized mode
         else:
             self.check_interval = config['check_interval']
@@ -427,7 +427,7 @@ class BikeMonitor:
                 except Exception as e:
                     if attempt < max_retries - 1:
                         logger.warning(f"Could not scrape detailed info for {bike.title}: {e} - retrying in 2 seconds...")
-                        await asyncio.sleep(2)  # Wait 2 seconds before retry
+                        await asyncio.sleep(self.request_delay * 2)  # Wait based on config delay
                         continue
                     else:
                         logger.warning(f"Could not scrape detailed info for {bike.title} after {max_retries} attempts: {e}")
@@ -530,7 +530,7 @@ class BikeMonitor:
                     processed_bikes_minimal.append(bike_minimal)
                     
                     # Small delay between checks to avoid rate limiting
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(self.request_delay)
                 
                 # Add all processed bikes to minimal cache to prevent re-processing
                 self.previous_listings_minimal.add_bikes(processed_bikes_minimal)
@@ -639,7 +639,7 @@ class BikeMonitor:
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")
                 # Continue running even if there's an error
-                await asyncio.sleep(10)  # Wait a bit before retrying
+                await asyncio.sleep(self.request_delay * 5)  # Wait based on config delay
     
     async def _run_centralized(self) -> None:
         """
@@ -663,7 +663,7 @@ class BikeMonitor:
                 break
             except Exception as e:
                 logger.error(f"Error in centralized monitoring: {e}")
-                await asyncio.sleep(10)
+                await asyncio.sleep(self.request_delay * 5)  # Wait based on config delay
     
     def stop(self) -> None:
         """

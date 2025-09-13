@@ -18,7 +18,7 @@ class CurrentListings:
     Manages a collection of bike listings with methods for comparison and persistence.
     """
     
-    def __init__(self, bikes: Optional[List[Bike]] = None, max_bikes: int = 300):
+    def __init__(self, bikes: Optional[List[Bike]] = None, max_bikes: int = None):
         """
         Initialize CurrentListings with an optional list of bikes.
         
@@ -27,14 +27,14 @@ class CurrentListings:
             max_bikes: Maximum number of bikes to keep in rolling window
         """
         self.bikes: List[Bike] = bikes or []
-        self.max_bikes = max_bikes
+        self.max_bikes = max_bikes or 300  # Default fallback only if not provided
         self._last_updated = datetime.now()
         
         # Ensure we don't exceed max_bikes
         self._enforce_max_bikes()
     
     @classmethod
-    def from_json_file(cls, file_path: Path, max_bikes: int = 300) -> 'CurrentListings':
+    def from_json_file(cls, file_path: Path, max_bikes: int = None) -> 'CurrentListings':
         """
         Load CurrentListings from a JSON file.
         
@@ -63,7 +63,7 @@ class CurrentListings:
             return cls(max_bikes=max_bikes)
     
     @classmethod
-    def from_list(cls, bike_data: List[Dict[str, Any]], max_bikes: int = 300) -> 'CurrentListings':
+    def from_list(cls, bike_data: List[Dict[str, Any]], max_bikes: int = None) -> 'CurrentListings':
         """
         Create CurrentListings from a list of bike dictionaries.
         
