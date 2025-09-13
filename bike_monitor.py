@@ -370,7 +370,7 @@ class BikeMonitor:
         
         # Create message with title as first line
         today_indicator = " 🆕" if is_today else ""
-        message = f"🚴‍♂️ <b>{bike.title}</b> 🚴‍♂️{today_indicator}\n\n"
+        message = f"🚴‍♂️ <b>{bike.title}</b> 🚴‍♂️{today_indicator}\n"
         message += f"<b>Prijs:</b> {price_str}\n"
         message += f"<b>Locatie:</b> {bike.location}\n"
         
