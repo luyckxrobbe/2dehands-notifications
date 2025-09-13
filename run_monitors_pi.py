@@ -38,22 +38,22 @@ class CentralizedSchedulerPi:
         self.centralized_config = centralized_config or {}
         self.running = False
         
-        # Use Pi-optimized timing from config
+        # Use centralized timing from configs/centralized-config.json
         if self.centralized_config.get('centralized_timing'):
             timing_config = self.centralized_config['centralized_timing']
-            self.base_interval = timing_config.get('base_interval', 600)  # 10 minutes default
+            self.base_interval = timing_config.get('base_interval', 300)  # 5 minutes default
             self.time_based_intervals = timing_config.get('time_based_intervals', {})
-            self.monitor_delay = timing_config.get('monitor_delay', 15)  # Use config value
-            logger.info(f"🕐 Using Pi-optimized timing - base interval: {self.base_interval} seconds")
+            self.monitor_delay = timing_config.get('monitor_delay', 10)  # Use config value
+            logger.info(f"🕐 Using centralized timing - base interval: {self.base_interval} seconds")
         else:
-            # Pi-optimized defaults
-            self.base_interval = 600  # 10 minutes
+            # Fallback defaults
+            self.base_interval = 300  # 5 minutes
             self.time_based_intervals = {}
-            self.monitor_delay = 15  # Fallback default
-            logger.warning(f"⚠️  No centralized timing config found, using Pi defaults - base interval: {self.base_interval} seconds")
+            self.monitor_delay = 10  # Fallback default
+            logger.warning(f"⚠️  No centralized timing config found, using defaults - base interval: {self.base_interval} seconds")
     
     def _get_current_interval(self) -> int:
-        """Get the current interval based on the time of day."""
+        """Get the current interval based on the time of day using centralized timing."""
         current_time = datetime.now().time()
         
         if self.time_based_intervals:
@@ -116,7 +116,7 @@ class CentralizedSchedulerPi:
                 if hasattr(self, '_last_interval') and self._last_interval != current_interval:
                     logger.info(f"⏰ Interval changed to {current_interval} seconds ({current_interval/60:.1f} minutes)")
                 elif not hasattr(self, '_last_interval'):
-                    logger.info(f"⏰ Using Pi-optimized interval: {current_interval} seconds ({current_interval/60:.1f} minutes)")
+                    logger.info(f"⏰ Using centralized timing interval: {current_interval} seconds ({current_interval/60:.1f} minutes)")
                 
                 self._last_interval = current_interval
                 
@@ -183,12 +183,7 @@ def create_monitor_pi(config_file: str) -> BikeMonitor:
     """Create a Pi-optimized BikeMonitor instance."""
     config = load_config(config_file)
     
-    # Add default check_interval if missing (use centralized config default)
-    if 'check_interval' not in config:
-        centralized_config = load_centralized_config()
-        default_interval = centralized_config.get('centralized_timing', {}).get('base_interval', 600)
-        config['check_interval'] = default_interval
-    
+    # Don't set check_interval - let centralized scheduler handle timing
     # Ensure Pi optimization is enabled
     config['pi_optimized'] = True
     
@@ -238,7 +233,7 @@ async def main():
         logger.info("  python run_monitors_pi.py configs/")
         logger.info("")
         logger.info("Pi-optimized features:")
-        logger.info("  - Longer intervals to reduce CPU load")
+        logger.info("  - Centralized timing from config-pi/centralized-config.json")
         logger.info("  - Reduced page counts and memory usage")
         logger.info("  - Optimized browser settings for ARM")
         logger.info("  - Sequential execution with delays")
@@ -322,7 +317,7 @@ async def main():
     
     logger.info(f"\n✅ Created {len(monitors)} Pi-optimized monitors")
     logger.info("Press Ctrl+C to stop all monitors")
-    logger.info("Pi-optimized timing: Longer intervals, reduced resource usage")
+    logger.info("Pi-optimized features: Centralized timing, reduced resource usage")
     logger.info("")
     
     try:
